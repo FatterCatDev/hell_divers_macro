@@ -16,6 +16,9 @@ dist/
 *.spec
 *.exe
 !packaging/*.spec
+dist/
+build/
+*.ico
 
 # App runtime data
 saves/

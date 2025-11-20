@@ -10,6 +10,7 @@ package_dir = src_dir / "hell_divers_macro"
 data_dir = project_root / "data"
 
 asset_dir = package_dir / "assets"
+icon_path = asset_dir / "helldivers_2_macro_icon.ico"
 datas = []
 if asset_dir.exists():
     datas += [
@@ -47,6 +48,7 @@ exe = EXE(
     a.datas,
     [],
     name="helldivers_macro",
+    icon=str(icon_path) if icon_path.exists() else None,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

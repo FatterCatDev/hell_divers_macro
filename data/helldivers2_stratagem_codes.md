@@ -1,4 +1,4 @@
-## 1. Offensive – Orbital Stratagems
+## 1. Offensive - Orbital Stratagems
 - **Orbital EMS Strike**: Right, Right, Left, Down
 - **Orbital Walking Barrage**: Right, Down, Right, Down, Right, Down
 - **Orbital 120MM HE Barrage**: Right, Right, Down, Left, Right, Down

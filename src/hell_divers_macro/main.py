@@ -71,6 +71,7 @@ def _resolve_assets_dir() -> Path:
 
 
 ASSETS_DIR = _resolve_assets_dir()
+APP_ICON_PATH = ASSETS_DIR / "helldivers_2_macro_icon.png"
 
 _cairosvg_mod = None
 _cairosvg_error = None
@@ -678,6 +679,11 @@ def main() -> None:
     root.title("HELLDIVERS2 Stratagem Macro")
     root.geometry("540x560")
     root.minsize(520, 520)
+    try:
+        if APP_ICON_PATH.exists():
+            root.iconphoto(True, tk.PhotoImage(file=str(APP_ICON_PATH)))
+    except Exception:
+        pass
     _init_base_theme(root)
     _apply_dark_theme(root)
     _set_dark_titlebar(root)

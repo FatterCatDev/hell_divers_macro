@@ -6,6 +6,8 @@ Creator: FatterCatDev
 
 A simple Windows app that lets you trigger HELLDIVERS 2 stratagems with your numpad. Pick a template for each numpad key, start listening, and the app will play the stratagem inputs for you.
 
+## [Download the macro here!](https://github.com/FatterCatDev/hell_divers_macro/releases/tag/helldivers_2_macro)
+
 ## Quick start (exe)
 1) Run `helldivers_macro.exe` (one-file build, no install needed).
 2) In the grid, click each numpad slot (7-9 / 4-6 / 1-3) and choose a stratagem.

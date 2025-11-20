@@ -4,6 +4,8 @@ DEFAULT_DELAY = 0.05  # seconds between key presses
 DEFAULT_DURATION = 0.05  # seconds a key stays pressed
 EXIT_HOTKEY = "ctrl+shift+q"
 SAVES_DIR_NAME = "saves"
+DEFAULT_PANEL_KEY = "home"
+DEFAULT_AUTO_PANEL = True
 
 # Describes the slot label and the keyboard hotkey used by the listener.
 NUMPAD_SLOTS = (

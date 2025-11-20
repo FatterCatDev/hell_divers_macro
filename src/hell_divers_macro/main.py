@@ -27,7 +27,9 @@ if __package__ in (None, ""):
 from .config import (
     DEFAULT_DELAY,
     DEFAULT_DURATION,
+    DEFAULT_AUTO_PANEL,
     DEFAULT_DIRECTION_KEYS,
+    DEFAULT_PANEL_KEY,
     DEFAULT_SLOT_HOTKEYS,
     EXIT_HOTKEY,
     NUMPAD_SLOTS,
@@ -38,6 +40,7 @@ from .paths import ensure_saves_dir
 from .stratagems import load_stratagem_templates, resolve_template_keys
 
 _macro_lock = threading.Lock()
+_auto_panel_state: dict[str, object] = {"enabled": DEFAULT_AUTO_PANEL, "key": DEFAULT_PANEL_KEY}
 
 # --- Theme -------------------------------------------------------------------
 BG = "#121212"
@@ -365,11 +368,15 @@ def _load_icon_image(name: str, hotkey_text: str) -> ImageTk.PhotoImage | None:
 
 
 # --- Macro execution helpers -------------------------------------------------
-def _run_macro(macro: Macro) -> None:
+def _run_macro(macro: Macro, panel_key: str | None = None) -> None:
     with _macro_lock:
         label = macro.name or macro.hotkey
-        log(f"{label}: running {len(macro.keys)} key presses...")
-        for key in macro.keys:
+        sequence = macro.keys
+        if panel_key:
+            sequence = (panel_key, *sequence)
+            log(f"{label}: auto panel ON, prepending '{panel_key}'.")
+        log(f"{label}: running {len(sequence)} key presses...")
+        for key in sequence:
             keyboard.press(key)
             time.sleep(macro.duration)
             keyboard.release(key)
@@ -384,7 +391,12 @@ def _launch_macro_from_hotkey(macro: Macro) -> None:
 
     label = macro.name or macro.hotkey
     log(f"Trigger received for hotkey '{macro.hotkey}' ({label}).")
-    threading.Thread(target=_run_macro, args=(macro,), daemon=True).start()
+    panel_key_arg = None
+    if _auto_panel_state.get("enabled"):
+        key = (_auto_panel_state.get("key") or "").strip()
+        if key:
+            panel_key_arg = str(key)
+    threading.Thread(target=_run_macro, args=(macro, panel_key_arg), daemon=True).start()
 
 
 # --- Data manager ------------------------------------------------------------
@@ -631,11 +643,18 @@ def main() -> None:
     assignments: dict[str, MacroTemplate | None] = {slot: None for slot, _ in NUMPAD_SLOTS}
     slot_hotkeys: dict[str, str] = dict(DEFAULT_SLOT_HOTKEYS)
     direction_keys: dict[str, str] = dict(DEFAULT_DIRECTION_KEYS)
+    panel_key: str = DEFAULT_PANEL_KEY
+    auto_panel_var = tk.BooleanVar(value=DEFAULT_AUTO_PANEL)
     slot_buttons: dict[str, tk.Button] = {}
     slot_icons: dict[str, ImageTk.PhotoImage | None] = {}
     listening = False
     saved_state: dict = {}
     macro_timing = {"delay": DEFAULT_DELAY, "duration": DEFAULT_DURATION}
+    panel_key_display = tk.StringVar(value="")
+
+    def sync_auto_panel_state() -> None:
+        _auto_panel_state["key"] = panel_key
+        _auto_panel_state["enabled"] = bool(auto_panel_var.get())
 
     def serialize_state() -> dict:
         return {
@@ -643,6 +662,7 @@ def main() -> None:
             "hotkeys": dict(slot_hotkeys),
             "direction_keys": dict(direction_keys),
             "timing": {"delay": macro_timing["delay"], "duration": macro_timing["duration"]},
+            "panel": {"key": panel_key, "auto": bool(auto_panel_var.get())},
         }
 
     def has_unsaved_changes() -> bool:
@@ -680,6 +700,14 @@ def main() -> None:
         for slot in assignments:
             update_button_label(slot)
 
+    def refresh_panel_key_display() -> None:
+        display_text = _display_hotkey_text(panel_key, panel_key or "Unset")
+        panel_key_display.set(display_text)
+
+    refresh_panel_key_display()
+    sync_auto_panel_state()
+    auto_panel_var.trace_add("write", lambda *_: sync_auto_panel_state())
+
     def rebuild_listeners() -> None:
         manager.clear()
         if not listening:
@@ -714,6 +742,25 @@ def main() -> None:
             rebuild_listeners()
 
     grid_frame = tk.Frame(root)
+
+    auto_panel_frame = tk.Frame(root)
+    auto_panel_frame.pack(fill=tk.X, padx=16, pady=(8, 0))
+    auto_panel_toggle = tk.Checkbutton(
+        auto_panel_frame,
+        text="Auto Stratagem Panel",
+        variable=auto_panel_var,
+        bg=BG,
+        fg=FG,
+        activebackground=BUTTON_BG,
+        activeforeground=FG,
+        selectcolor=BG,
+        highlightthickness=0,
+        anchor="w",
+    )
+    auto_panel_toggle.pack(side=tk.LEFT)
+    tk.Label(auto_panel_frame, text="Panel key:", anchor="w").pack(side=tk.LEFT, padx=(12, 4))
+    tk.Label(auto_panel_frame, textvariable=panel_key_display, anchor="w").pack(side=tk.LEFT)
+
     grid_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
 
     grid_layout = [
@@ -791,9 +838,12 @@ def main() -> None:
         hotkey_labels: dict[str, tk.Label] = {}
         dir_buttons: dict[str, tk.Button] = {}
         dir_labels: dict[str, tk.Label] = {}
+        panel_change_btn: tk.Button | None = None
+        panel_key_label_var = tk.StringVar(value=_display_hotkey_text(panel_key, panel_key))
         capturing = {"active": False}
         pending_hotkeys: dict[str, str] = dict(slot_hotkeys)
         pending_direction_keys: dict[str, str] = dict(direction_keys)
+        pending_panel_key = panel_key
 
         tabs_frame = tk.Frame(settings)
         tabs_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
@@ -804,6 +854,7 @@ def main() -> None:
         slot_section = tk.Frame(content_frame)
         dir_section = tk.Frame(content_frame)
         delay_section = tk.Frame(content_frame)
+        panel_section = tk.Frame(content_frame)
 
         active_values = {"delay": macro_timing["delay"], "duration": macro_timing["duration"]}
 
@@ -815,6 +866,7 @@ def main() -> None:
                 or pending_direction_keys != direction_keys
                 or active_values["delay"] != macro_timing["delay"]
                 or active_values["duration"] != macro_timing["duration"]
+                or pending_panel_key != panel_key
             )
 
         def refresh_labels() -> None:
@@ -822,21 +874,32 @@ def main() -> None:
                 label.config(text=_display_hotkey_text(pending_hotkeys.get(slot, ""), slot))
             for direction, label in dir_labels.items():
                 label.config(text=pending_direction_keys.get(direction, ""))
+            panel_key_label_var.set(_display_hotkey_text(pending_panel_key, pending_panel_key))
             settings.update_idletasks()
+
+        def _all_capture_buttons() -> list[tk.Button]:
+            buttons: list[tk.Button] = list(change_buttons.values()) + list(dir_buttons.values())
+            if panel_change_btn is not None:
+                buttons.append(panel_change_btn)
+            return buttons
 
         def finish_capture(
             target: str, new_key: str | None, error: str | None, was_listening: bool, kind: str
         ) -> None:
+            nonlocal pending_panel_key
             capturing["active"] = False
-            for btn in list(change_buttons.values()) + list(dir_buttons.values()):
+            for btn in _all_capture_buttons():
                 btn.config(state=tk.NORMAL)
             if new_key:
                 if kind == "slot":
                     pending_hotkeys[target] = new_key
                     status_local.set(f"Numpad {target} pending bind to '{new_key}'. Click Apply to confirm.")
-                else:
+                elif kind == "direction":
                     pending_direction_keys[target] = new_key
                     status_local.set(f"{target} pending bind to '{new_key}'. Click Apply to confirm.")
+                else:
+                    pending_panel_key = new_key
+                    status_local.set(f"Stratagem Panel pending bind to '{new_key}'. Click Apply to confirm.")
                 refresh_labels()
             elif error:
                 status_local.set(error)
@@ -857,9 +920,11 @@ def main() -> None:
                 f"Press a key to bind to numpad {target}..."
                 if kind == "slot"
                 else f"Press a key to bind to {target} direction..."
+                if kind == "direction"
+                else "Press a key to open the Stratagem Panel..."
             )
             status_local.set(prompt)
-            for btn in list(change_buttons.values()) + list(dir_buttons.values()):
+            for btn in _all_capture_buttons():
                 btn.config(state=tk.DISABLED)
 
             def worker() -> None:
@@ -875,20 +940,27 @@ def main() -> None:
             threading.Thread(target=worker, daemon=True).start()
 
         def apply_and_stay() -> None:
+            nonlocal panel_key
             slot_hotkeys.update(pending_hotkeys)
             direction_keys.update(pending_direction_keys)
             macro_timing["delay"] = active_values["delay"]
             macro_timing["duration"] = active_values["duration"]
+            panel_key = pending_panel_key
+            refresh_panel_key_display()
+            sync_auto_panel_state()
             update_all_buttons()
             if listening:
                 rebuild_listeners()
             status_local.set("Applied bindings.")
 
         def reset_pending_from_live() -> None:
+            nonlocal pending_panel_key
             pending_hotkeys.clear()
             pending_hotkeys.update(slot_hotkeys)
             pending_direction_keys.clear()
             pending_direction_keys.update(direction_keys)
+            pending_panel_key = panel_key
+            panel_key_label_var.set(_display_hotkey_text(pending_panel_key, pending_panel_key))
             active_values["delay"] = macro_timing["delay"]
             active_values["duration"] = macro_timing["duration"]
             refresh_labels()
@@ -902,7 +974,7 @@ def main() -> None:
                 else:
                     reset_pending_from_live()
             # hide all
-            for frame in (slot_section, dir_section, delay_section):
+            for frame in (slot_section, dir_section, delay_section, panel_section):
                 frame.pack_forget()
             # show target
             if target == "slot":
@@ -910,26 +982,38 @@ def main() -> None:
                 slot_btn.config(relief=tk.SUNKEN)
                 dir_btn.config(relief=tk.RAISED)
                 delay_btn.config(relief=tk.RAISED)
+                panel_btn.config(relief=tk.RAISED)
             else:
                 if target == "direction":
                     dir_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
                     dir_btn.config(relief=tk.SUNKEN)
                     slot_btn.config(relief=tk.RAISED)
                     delay_btn.config(relief=tk.RAISED)
+                    panel_btn.config(relief=tk.RAISED)
                 else:
-                    delay_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-                    delay_btn.config(relief=tk.SUNKEN)
-                    slot_btn.config(relief=tk.RAISED)
-                    dir_btn.config(relief=tk.RAISED)
+                    if target == "panel":
+                        panel_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+                        panel_btn.config(relief=tk.SUNKEN)
+                        slot_btn.config(relief=tk.RAISED)
+                        dir_btn.config(relief=tk.RAISED)
+                        delay_btn.config(relief=tk.RAISED)
+                    else:
+                        delay_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+                        delay_btn.config(relief=tk.SUNKEN)
+                        slot_btn.config(relief=tk.RAISED)
+                        dir_btn.config(relief=tk.RAISED)
+                        panel_btn.config(relief=tk.RAISED)
             current_category["val"] = target
             settings.update_idletasks()
 
         slot_btn = tk.Button(tabs_frame, text="Slot Hotkeys", command=lambda: switch_category("slot"))
         dir_btn = tk.Button(tabs_frame, text="Direction Keys", command=lambda: switch_category("direction"))
+        panel_btn = tk.Button(tabs_frame, text="Panel Key", command=lambda: switch_category("panel"))
         delay_btn = tk.Button(tabs_frame, text="Macro Delay", command=lambda: switch_category("delay"))
         slot_btn.pack(side=tk.LEFT, padx=(0, 6))
         dir_btn.pack(side=tk.LEFT)
-        delay_btn.pack(side=tk.LEFT, padx=(6, 0))
+        panel_btn.pack(side=tk.LEFT, padx=(6, 6))
+        delay_btn.pack(side=tk.LEFT)
 
         # Build slot section
         for slot, _ in NUMPAD_SLOTS:
@@ -954,6 +1038,15 @@ def main() -> None:
             btn = tk.Button(row, text="Change", command=lambda d=direction: start_capture(d, "direction"))
             btn.pack(side=tk.LEFT)
             dir_buttons[direction] = btn
+
+        # Build panel section
+        row = tk.Frame(panel_section)
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(row, text="Stratagem Panel", width=16, anchor="w").pack(side=tk.LEFT)
+        panel_label = tk.Label(row, textvariable=panel_key_label_var, width=12, anchor="w")
+        panel_label.pack(side=tk.LEFT, padx=(0, 6))
+        panel_change_btn = tk.Button(row, text="Change", command=lambda: start_capture("panel", "panel"))
+        panel_change_btn.pack(side=tk.LEFT)
 
         # Build delay section
         tk.Label(delay_section, text="Milliseconds between key presses:", anchor="w").pack(
@@ -1030,7 +1123,7 @@ def main() -> None:
             saved_state = serialize_state()
 
     def _load_profile_from_path(path: Path, show_messages: bool = True) -> bool:
-        nonlocal saved_state
+        nonlocal saved_state, panel_key
         try:
             with path.open("r", encoding="utf-8") as fh:
                 content = json.load(fh)
@@ -1089,6 +1182,24 @@ def main() -> None:
             except (TypeError, ValueError):
                 pass
 
+        panel_data = content.get("panel")
+        if isinstance(panel_data, dict):
+            key_val = panel_data.get("key")
+            if isinstance(key_val, str) and key_val.strip():
+                panel_key = key_val.strip().lower()
+            else:
+                panel_key = DEFAULT_PANEL_KEY
+            auto_val = panel_data.get("auto")
+            if isinstance(auto_val, bool):
+                auto_panel_var.set(auto_val)
+            else:
+                auto_panel_var.set(DEFAULT_AUTO_PANEL)
+        else:
+            panel_key = DEFAULT_PANEL_KEY
+            auto_panel_var.set(DEFAULT_AUTO_PANEL)
+        refresh_panel_key_display()
+        sync_auto_panel_state()
+
         update_all_buttons()
         if listening:
             rebuild_listeners()
@@ -1118,16 +1229,20 @@ def main() -> None:
 
     def load_blank_profile(show_messages: bool = True) -> None:
         """Reset to defaults and clear last-profile marker."""
-        nonlocal saved_state
+        nonlocal saved_state, panel_key
         assignments.clear()
         assignments.update({slot: None for slot, _ in NUMPAD_SLOTS})
         slot_hotkeys.clear()
         slot_hotkeys.update(DEFAULT_SLOT_HOTKEYS)
         direction_keys.clear()
         direction_keys.update(DEFAULT_DIRECTION_KEYS)
+        panel_key = DEFAULT_PANEL_KEY
+        auto_panel_var.set(DEFAULT_AUTO_PANEL)
         macro_timing["delay"] = DEFAULT_DELAY
         macro_timing["duration"] = DEFAULT_DURATION
         update_all_buttons()
+        refresh_panel_key_display()
+        sync_auto_panel_state()
         if listening:
             rebuild_listeners()
         saved_state = serialize_state()
@@ -1152,7 +1267,8 @@ def main() -> None:
                 pass
 
     menu_bar = tk.Frame(root, bg=MENU_BG, bd=0, highlightthickness=0)
-    menu_bar.pack(fill=tk.X, side=tk.TOP, before=grid_frame)
+    # Place the menu bar above the auto-panel row.
+    menu_bar.pack(fill=tk.X, side=tk.TOP, before=auto_panel_frame)
 
     file_menu = tk.Menu(
         root,

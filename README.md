@@ -21,7 +21,7 @@ Set these in HELLDIVERS 2 before using the macro (they match the app defaults an
 - Down: Down Arrow
 - Left: Left Arrow
 - Right: Right Arrow
-- Stratagem List (panel): Home
+- Stratagem List (panel): Home (Make it Key Press instead of Hold)
 
 ## Controls and options
 - **Auto Stratagem Panel**: Toggle on to press the panel key (default `Home`) before every macro. Change the panel key via Settings.

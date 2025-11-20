@@ -16,7 +16,7 @@ class Macro:
 @dataclass
 class MacroRecord:
     macro: Macro
-    handle: int
+    handle: object
 
 
 @dataclass(frozen=True)

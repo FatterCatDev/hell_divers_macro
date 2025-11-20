@@ -1,8 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from pathlib import Path
 
-
-project_root = Path(__file__).resolve().parents[1]
+# Resolve this spec file path even when __file__ is not set.
+_spec_path = Path(__file__) if "__file__" in globals() else Path(sys.argv[0])
+project_root = _spec_path.resolve().parents[1]
 src_dir = project_root / "src"
 package_dir = src_dir / "hell_divers_macro"
 data_dir = project_root / "data"

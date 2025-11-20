@@ -21,10 +21,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import sys
 
 if __package__ in (None, ""):
+    # Allow running as a script by adding project src to path for absolute imports.
     sys.path.append(str(Path(__file__).resolve().parent.parent))
-    __package__ = "hell_divers_macro"
 
-from .config import (
+from hell_divers_macro.config import (
     DEFAULT_DELAY,
     DEFAULT_DURATION,
     DEFAULT_AUTO_PANEL,
@@ -34,10 +34,14 @@ from .config import (
     EXIT_HOTKEY,
     NUMPAD_SLOTS,
 )
-from .log_utils import clear_log_callback, log, set_log_callback
-from .models import Macro, MacroRecord, MacroTemplate
-from .paths import ensure_saves_dir
-from .stratagems import load_stratagem_templates, resolve_template_keys
+from hell_divers_macro.log_utils import clear_log_callback, log, set_log_callback
+from hell_divers_macro.models import Macro, MacroRecord, MacroTemplate
+from hell_divers_macro.paths import ensure_saves_dir
+from hell_divers_macro.stratagems import (
+    load_stratagem_templates,
+    resolve_template_keys,
+    save_stratagem_templates,
+)
 
 _macro_lock = threading.Lock()
 _auto_panel_state: dict[str, object] = {"enabled": DEFAULT_AUTO_PANEL, "key": DEFAULT_PANEL_KEY}
@@ -54,7 +58,19 @@ IS_WINDOWS = platform.system() == "Windows"
 ICON_SIZE = (120, 110)
 SLOT_WIDTH = 160
 SLOT_HEIGHT = 150
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
+
+def _resolve_assets_dir() -> Path:
+    """Locate assets, preferring packaged paths when frozen."""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path.cwd()))
+        for candidate in (base / "hell_divers_macro" / "assets", base / "assets"):
+            if candidate.exists():
+                return candidate
+    return Path(__file__).resolve().parent / "assets"
+
+
+ASSETS_DIR = _resolve_assets_dir()
 
 _cairosvg_mod = None
 _cairosvg_error = None
@@ -403,14 +419,32 @@ def _launch_macro_from_hotkey(macro: Macro) -> None:
 class MacroManager:
     def __init__(self) -> None:
         self.records: List[MacroRecord] = []
+        self._held_scancodes: set[int] = set()
 
     def _register_macro(self, macro: Macro) -> int:
-        return keyboard.add_hotkey(
-            macro.hotkey,
-            _launch_macro_from_hotkey,
-            args=(macro,),
-            suppress=False,
-        )
+        def on_press(event) -> None:
+            if event.event_type != "down":
+                return
+            # Ignore non-keypad arrows triggering numpad hotkeys.
+            if macro.hotkey.startswith("num "):
+                is_keypad = getattr(event, "is_keypad", None)
+                if is_keypad is False:
+                    return
+                if is_keypad is None and event.name in ("up", "down", "left", "right"):
+                    return
+            sc = event.scan_code
+            if sc in self._held_scancodes:
+                return
+            self._held_scancodes.add(sc)
+            _launch_macro_from_hotkey(macro)
+
+        def on_release(event) -> None:
+            sc = event.scan_code
+            self._held_scancodes.discard(sc)
+
+        press_hook = keyboard.on_press_key(macro.hotkey, on_press, suppress=False)
+        release_hook = keyboard.on_release_key(macro.hotkey, on_release, suppress=False)
+        return (press_hook, release_hook)
 
     def _hotkey_in_use(self, hotkey: str, ignore_index: int | None = None) -> bool:
         for idx, record in enumerate(self.records):
@@ -435,7 +469,9 @@ class MacroManager:
         if self._hotkey_in_use(hotkey, ignore_index=index):
             raise ValueError(f"Hotkey '{hotkey}' already in use.")
         new_macro = Macro(hotkey, tuple(macro.keys), macro.delay, macro.duration, macro.name)
-        keyboard.remove_hotkey(self.records[index].handle)
+        press_hook, release_hook = self.records[index].handle
+        keyboard.unhook(press_hook)
+        keyboard.unhook(release_hook)
         handle = self._register_macro(new_macro)
         self.records[index] = MacroRecord(new_macro, handle)
 
@@ -443,11 +479,14 @@ class MacroManager:
         if not (0 <= index < len(self.records)):
             raise IndexError("Invalid macro index.")
         record = self.records.pop(index)
-        keyboard.remove_hotkey(record.handle)
+        press_hook, release_hook = record.handle
+        keyboard.unhook(press_hook)
+        keyboard.unhook(release_hook)
 
     def clear(self) -> None:
         for record in self.records:
-            keyboard.remove_hotkey(record.handle)
+            press_hook, release_hook = record.handle
+            keyboard.unhook(press_hook)
         self.records.clear()
 
 
@@ -485,7 +524,10 @@ class MacroSelectionDialog:
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
 
         self.listbox = tk.Listbox(list_frame, height=12)
-        self.listbox.pack(fill=tk.BOTH, expand=True)
+        list_scroll = tk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
+        self.listbox.config(yscrollcommand=list_scroll.set)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         current_cat = {"val": ordered_categories[0] if ordered_categories else ""}
         visible = list(self.templates)
@@ -1093,6 +1135,147 @@ def main() -> None:
         refresh_labels()
 
     # --- Persistence ---
+    def open_edit_templates() -> None:
+        nonlocal templates
+        edit = tk.Toplevel(root, bg=BG)
+        edit.title("Edit Stratagem Templates")
+        edit.resizable(True, True)
+        _place_window_near(edit, root)
+        _set_dark_titlebar(edit)
+
+        working: list[MacroTemplate] = list(templates)
+        filter_var = tk.StringVar()
+        listbox = tk.Listbox(edit, height=16)
+        scroll = tk.Scrollbar(edit, orient="vertical", command=listbox.yview)
+        listbox.config(yscrollcommand=scroll.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 10))
+        scroll.pack(side=tk.LEFT, fill=tk.Y, pady=(0, 10))
+
+        detail = tk.Frame(edit, bg=BG)
+        detail.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        name_var = tk.StringVar()
+        category_var = tk.StringVar()
+        directions_text = tk.Text(detail, height=4, width=30, bg=ENTRY_BG, fg=FG, insertbackground=FG)
+        status_var = tk.StringVar(value="Select a template to edit.")
+
+        # Search bar
+        search_frame = tk.Frame(edit, bg=BG)
+        search_frame.pack(fill=tk.X, padx=10, pady=(10, 6))
+        tk.Label(search_frame, text="Search", anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        search_entry = tk.Entry(search_frame, textvariable=filter_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(detail, text="Name (read-only):", anchor="w").pack(fill=tk.X)
+        tk.Label(detail, textvariable=name_var, anchor="w").pack(fill=tk.X, pady=(0, 6))
+        tk.Label(detail, text="Category:", anchor="w").pack(fill=tk.X)
+        tk.Entry(detail, textvariable=category_var).pack(fill=tk.X, pady=(0, 6))
+        tk.Label(detail, text="Directions (comma separated):", anchor="w").pack(fill=tk.X)
+        directions_text.pack(fill=tk.BOTH, expand=False, pady=(0, 6))
+        tk.Label(detail, textvariable=status_var, anchor="w", wraplength=280).pack(fill=tk.X, pady=(0, 8))
+
+        btns = tk.Frame(detail, bg=BG)
+        btns.pack(fill=tk.X)
+
+        current_index = {"val": None}
+
+        def refresh_list(select: int | None = None) -> None:
+            listbox.delete(0, tk.END)
+            query = filter_var.get().strip().lower()
+            filtered: list[MacroTemplate] = []
+            for tpl in working:
+                if not query or query in tpl.name.lower() or query in tpl.category.lower():
+                    filtered.append(tpl)
+                    listbox.insert(tk.END, tpl.name)
+            listbox._filtered = filtered  # type: ignore[attr-defined]
+            if select is not None and listbox.size() and 0 <= select < listbox.size():
+                listbox.selection_set(select)
+                listbox.see(select)
+                load_selection(select)
+
+        def load_selection(idx: int) -> None:
+            filtered = getattr(listbox, "_filtered", working)  # type: ignore[attr-defined]
+            if not (0 <= idx < len(filtered)):
+                return
+            tpl = filtered[idx]
+            # find real index in working
+            try:
+                real_idx = working.index(tpl)
+            except ValueError:
+                real_idx = idx
+            current_index["val"] = idx
+            name_var.set(tpl.name)
+            category_var.set(tpl.category)
+            directions_text.delete("1.0", tk.END)
+            directions_text.insert(tk.END, ", ".join(tpl.directions))
+            status_var.set("Edit category or directions, then Apply.")
+
+        def parse_directions(raw: str) -> list[str]:
+            vals = [part.strip() for part in raw.split(",") if part.strip()]
+            if not vals:
+                raise ValueError("Enter at least one direction (comma separated).")
+            return [v.title() for v in vals]
+
+        def apply_current() -> bool:
+            idx = current_index["val"]
+            filtered = getattr(listbox, "_filtered", working)  # type: ignore[attr-defined]
+            if idx is None or not (0 <= idx < len(filtered)):
+                status_var.set("Select a template first.")
+                return False
+            try:
+                directions = tuple(parse_directions(directions_text.get("1.0", tk.END)))
+            except ValueError as exc:
+                messagebox.showerror("Invalid directions", str(exc))
+                return False
+            tpl = filtered[idx]
+            category = category_var.get().strip() or tpl.category
+            updated = MacroTemplate(tpl.name, directions, tpl.delay, category=category)
+            # replace in working
+            for i, item in enumerate(working):
+                if item.name == tpl.name:
+                    working[i] = updated
+                    break
+            status_var.set(f"Updated {tpl.name}. Remember to Save Templates.")
+            return True
+
+        def save_all_and_refresh() -> None:
+            if not apply_current():
+                return
+            save_stratagem_templates(tuple(working))
+            templates = tuple(working)
+            name_map = {tpl.name: tpl for tpl in templates}
+            for slot, tpl in list(assignments.items()):
+                if tpl is None:
+                    continue
+                assignments[slot] = name_map.get(tpl.name, tpl)
+            update_all_buttons()
+            if listening:
+                rebuild_listeners()
+            status_var.set("Templates saved.")
+            messagebox.showinfo("Templates saved", "Stratagem templates saved and reloaded.")
+
+        tk.Button(btns, text="Apply Changes", command=apply_current).pack(side=tk.LEFT)
+        tk.Button(btns, text="Save Templates", command=save_all_and_refresh).pack(side=tk.RIGHT)
+
+        def on_select(event=None):  # noqa: ANN001
+            sel = listbox.curselection()
+            if not sel:
+                return
+            load_selection(sel[0])
+
+        def on_search(*args):  # noqa: ANN001
+            refresh_list(0)
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        filter_var.trace_add("write", on_search)
+        if working:
+            refresh_list(0)
+        else:
+            status_var.set("No templates to edit.")
+
+        _apply_dark_theme(edit)
+        edit.grab_set()
+
     def _save_profile_to_path(path: Path, show_message: bool = True) -> bool:
         data = serialize_state()
         try:
@@ -1290,6 +1473,18 @@ def main() -> None:
     file_menu.add_separator()
     file_menu.add_command(label="Exit", command=lambda: root.event_generate("<<RequestExit>>"))
 
+    edit_menu = tk.Menu(
+        root,
+        tearoff=False,
+        bg=MENU_BG,
+        fg=FG,
+        activebackground=BUTTON_ACTIVE,
+        activeforeground=FG,
+        relief=tk.FLAT,
+        bd=0,
+    )
+    edit_menu.add_command(label="Edit Stratagem Templates", command=open_edit_templates)
+
     def show_about() -> None:
         about = tk.Toplevel(root, bg=BG)
         about.title("About")
@@ -1377,6 +1572,7 @@ def main() -> None:
         btn.pack(side=tk.LEFT)
 
     _add_menu_button("File", file_menu)
+    _add_menu_button("Edit", edit_menu)
     _add_menu_button("Help", help_menu)
 
     def _refresh_menu_bar_colors() -> None:

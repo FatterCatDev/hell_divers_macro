@@ -55,3 +55,18 @@ def resolve_template_keys(
         else:
             keys.append(direction.lower())
     return tuple(keys)
+
+
+def save_stratagem_templates(templates: Tuple[MacroTemplate, ...]) -> None:
+    """Persist templates back to the markdown file."""
+    path = stratagem_md_path()
+    lines: list[str] = []
+    seen_categories: list[str] = []
+    for tpl in templates:
+        if tpl.category not in seen_categories:
+            seen_categories.append(tpl.category)
+            lines.append(f"## {tpl.category}")
+        directions_text = ", ".join(tpl.directions)
+        lines.append(f"- **{tpl.name}**: {directions_text}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -1,5 +1,3 @@
-# Helldivers 2 Stratagem Codes
-
 ## 1. Offensive – Orbital Stratagems
 - **Orbital EMS Strike**: Right, Right, Left, Down
 - **Orbital Walking Barrage**: Right, Down, Right, Down, Right, Down
@@ -13,7 +11,6 @@
 - **Orbital Precision Strike**: Right, Right, Up
 - **Orbital Airburst Strike**: Right, Right, Right
 - **Orbital Laser**: Right, Down, Up, Right, Down
-
 ## 2. Offensive – Eagle Stratagems
 - **Eagle Cluster Bomb**: Up, Right, Down, Down, Right
 - **Eagle Airstrike**: Up, Right, Down, Right
@@ -22,7 +19,6 @@
 - **Eagle Napalm Airstrike**: Up, Right, Down, Up
 - **Eagle 110mm Rocket Pods**: Up, Right, Up, Left
 - **Eagle 500kg Bomb**: Up, Right, Down, Down, Down
-
 ## 3. Supply – Support Weapons
 - **ARC-3 Arc Thrower**: Down, Right, Down, Up, Left, Left
 - **M-105 Stalwart**: Down, Left, Down, Up, Up, Left
@@ -44,7 +40,6 @@
 - **MLS-4X Commando**: Down, Left, Up, Down, Right
 - **APW-1 Anti-Materiel Rifle**: Down, Left, Right, Up, Down
 - **MG-206 Heavy Machine Gun**: Down, Left, Up, Down, Down
-
 ## 4. Supply – Backpacks
 - **AX/TX-13 Guard Dog Dog Breath**: Down, Up, Left, Up, Right, Up
 - **LIFT-860 Hover Pack**: Down, Up, Up, Down, Left, Right
@@ -57,12 +52,10 @@
 - **AX/LAS-5 Guard Dog Rover**: Down, Up, Left, Up, Right, Right
 - **SH-32 Shield Generator Pack**: Down, Up, Left, Right, Left, Right
 - **B-100 Portable Hellbomb**: Down, Right, Up, Up, Up
-
 ## 5. Vehicles
 - **EXO-45 Patriot Exosuit**: Left, Down, Right, Up, Left, Down, Down
 - **M-102 Fast Recon Vehicle**: Left, Down, Right, Down, Right, Down, Up
 - **EXO-49 Emancipator Exosuit**: Left, Down, Right, Up, Left, Down, Up
-
 ## 6. Defensive Stratagems
 - **MD-6 Anti-Personnel Minefield**: Down, Left, Up, Right
 - **A/M-12 Mortar Sentry**: Down, Up, Right, Right, Down
@@ -80,7 +73,6 @@
 - **MD-8 Gas Mines**: Down, Left, Left, Right
 - **E/FLAM-40 Flame Sentry**: Down, Up, Right, Down, Up, Up
 - **A/MLS-4X Rocket Sentry**: Down, Up, Right, Right, Left
-
 ## 7. Mission Stratagems
 - **Upload Data**: Left, Right, Up, Up, Up
 - **SEAF Artillery**: Right, Up, Up, Down
@@ -90,6 +82,6 @@
 - **SOS Beacon**: Up, Down, Right, Up
 - **NUX-223 Hellbomb**: Down, Up, Left, Down, Up, Right, Down, Up
 - **Eagle Rearm**: Up, Up, Left, Up, Right
-- **Resupply**: Down, Down, Right, Up
+- **Resupply**: Down, Down, Up, Right
 - **SSSD Delivery**: Down, Down, Down, Up, Up
 - **Seismic Probe**: Up, Up, Left, Right, Down, Down

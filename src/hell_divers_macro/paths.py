@@ -18,4 +18,10 @@ def ensure_saves_dir() -> Path:
 
 
 def stratagem_md_path() -> Path:
+    # When frozen, packaged data lives under the PyInstaller extraction dir (_MEIPASS).
+    resource_base = getattr(sys, "_MEIPASS", None)
+    if resource_base:
+        candidate = Path(resource_base) / "data" / "helldivers2_stratagem_codes.md"
+        if candidate.exists():
+            return candidate
     return get_base_dir() / "data" / "helldivers2_stratagem_codes.md"

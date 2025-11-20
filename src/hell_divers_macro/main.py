@@ -58,6 +58,8 @@ IS_WINDOWS = platform.system() == "Windows"
 ICON_SIZE = (120, 110)
 SLOT_WIDTH = 160
 SLOT_HEIGHT = 150
+OVERLAY_ICON_SIZE = (96, 88)
+OVERLAY_ALPHA = 0.82
 
 
 def _resolve_assets_dir() -> Path:
@@ -81,7 +83,10 @@ _svglib_mod = None
 _svglib_error = None
 _HAS_SVGLIB = False
 
-_icon_cache: dict[tuple[str, str], ImageTk.PhotoImage] = {}
+_icon_cache: dict[tuple[str, str, str, tuple[int, int]], ImageTk.PhotoImage] = {}
+_overlay_placeholder_cache: dict[tuple[str, tuple[int, int]], ImageTk.PhotoImage] = {}
+_macro_progress_callback = None
+_slot_hotkey_lookup: dict[str, str] = {}
 
 
 def _apply_dark_theme(widget: tk.Misc) -> None:
@@ -334,9 +339,37 @@ def _svg_to_png_bytes(svg_bytes: bytes) -> bytes | None:
     return None
 
 
-def _load_icon_image(name: str, hotkey_text: str) -> ImageTk.PhotoImage | None:
-    """Return a PhotoImage with icon + overlay text, or None if unavailable."""
-    cache_key = (name, hotkey_text)
+def _draw_key_badge(draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, key_text: str) -> None:
+    """Draw a small dark circle badge with the hotkey text."""
+    if not key_text:
+        return
+    bbox = draw.textbbox((0, 0), key_text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    radius = int(max(text_w, text_h) / 2 + 6)
+    cx = 10 + radius
+    cy = 10 + radius
+    draw.ellipse(
+        (cx - radius, cy - radius, cx + radius, cy + radius),
+        fill=(18, 18, 18, 210),
+    )
+    draw.text(
+        (cx - text_w / 2, cy - text_h / 2),
+        key_text,
+        font=font,
+        fill=(229, 229, 229, 255),
+    )
+
+
+def _load_icon_image(
+    name: str, hotkey_text: str, *, variant: str = "full", size: tuple[int, int] | None = None
+) -> ImageTk.PhotoImage | None:
+    """Return a PhotoImage with icon overlays, or None if unavailable.
+
+    variant: "full" keeps the name ribbon; "badge" keeps only the key badge.
+    """
+    target_size = size or ICON_SIZE
+    cache_key = (name, hotkey_text, variant, target_size)
     if cache_key in _icon_cache:
         return _icon_cache[cache_key]
 
@@ -348,8 +381,8 @@ def _load_icon_image(name: str, hotkey_text: str) -> ImageTk.PhotoImage | None:
     try:
         if asset_path.suffix.lower() == ".png":
             image = Image.open(asset_path).convert("RGBA")
-            if image.size != ICON_SIZE:
-                image = image.resize(ICON_SIZE, Image.LANCZOS)
+            if image.size != target_size:
+                image = image.resize(target_size, Image.LANCZOS)
         else:
             svg_bytes = asset_path.read_bytes()
             png_bytes = _svg_to_png_bytes(svg_bytes)
@@ -363,25 +396,53 @@ def _load_icon_image(name: str, hotkey_text: str) -> ImageTk.PhotoImage | None:
                     _load_icon_image._warned = True
                 return None
             image = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+            if image.size != target_size:
+                image = image.resize(target_size, Image.LANCZOS)
         draw = ImageDraw.Draw(image)
         font = ImageFont.load_default()
 
         # Top-left hotkey label.
-        if hotkey_text:
-            draw.text((6, 4), hotkey_text, font=font, fill=(229, 229, 229, 255))
+        key_text = hotkey_text.strip()
+        if key_text:
+            if variant == "badge":
+                _draw_key_badge(draw, font, key_text)
+            else:
+                draw.text((6, 4), key_text, font=font, fill=(229, 229, 229, 255))
 
         # Bottom name overlay.
-        name_w, name_h = draw.textbbox((0, 0), name, font=font)[2:]
-        overlay_height = name_h + 8
-        y0 = image.height - overlay_height
-        draw.rectangle([0, y0, image.width, image.height], fill=(18, 18, 18, 180))
-        draw.text(((image.width - name_w) / 2, y0 + 4), name, font=font, fill=(229, 229, 229, 255))
+        if variant == "full":
+            name_w, name_h = draw.textbbox((0, 0), name, font=font)[2:]
+            overlay_height = name_h + 8
+            y0 = image.height - overlay_height
+            draw.rectangle([0, y0, image.width, image.height], fill=(18, 18, 18, 180))
+            draw.text(
+                ((image.width - name_w) / 2, y0 + 4),
+                name,
+                font=font,
+                fill=(229, 229, 229, 255),
+            )
 
         photo = ImageTk.PhotoImage(image)
         _icon_cache[cache_key] = photo
         return photo
     except Exception:
         return None
+
+
+def _build_overlay_placeholder(hotkey_text: str, size: tuple[int, int] = OVERLAY_ICON_SIZE) -> ImageTk.PhotoImage:
+    """Create a dimmed placeholder tile with just the hotkey badge."""
+    label = hotkey_text.strip() or "?"
+    cache_key = (label, size)
+    if cache_key in _overlay_placeholder_cache:
+        return _overlay_placeholder_cache[cache_key]
+    image = Image.new("RGBA", size, (26, 26, 26, 180))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((1, 1, size[0] - 2, size[1] - 2), outline=(70, 70, 70, 210), width=2)
+    font = ImageFont.load_default()
+    _draw_key_badge(draw, font, label)
+    photo = ImageTk.PhotoImage(image)
+    _overlay_placeholder_cache[cache_key] = photo
+    return photo
 
 
 # --- Macro execution helpers -------------------------------------------------
@@ -401,6 +462,17 @@ def _run_macro(macro: Macro, panel_key: str | None = None) -> None:
         log(f"{label}: done.")
 
 
+def _notify_macro_progress(event: str, macro: Macro, slot: str | None, total_time: float | None) -> None:
+    cb = _macro_progress_callback
+    if cb is None:
+        return
+    try:
+        cb(event, macro, slot, total_time)
+    except Exception:
+        # Never let UI callbacks break macro execution.
+        pass
+
+
 def _launch_macro_from_hotkey(macro: Macro) -> None:
     if _macro_lock.locked():
         log("Another macro is running, ignoring new request.")
@@ -413,7 +485,18 @@ def _launch_macro_from_hotkey(macro: Macro) -> None:
         key = (_auto_panel_state.get("key") or "").strip()
         if key:
             panel_key_arg = str(key)
-    threading.Thread(target=_run_macro, args=(macro, panel_key_arg), daemon=True).start()
+    slot = _slot_hotkey_lookup.get(macro.hotkey.lower())
+    total_len = len(macro.keys) + (1 if panel_key_arg else 0)
+    total_time = total_len * (macro.duration + macro.delay)
+    _notify_macro_progress("start", macro, slot, total_time)
+
+    def _worker() -> None:
+        try:
+            _run_macro(macro, panel_key_arg)
+        finally:
+            _notify_macro_progress("stop", macro, slot, None)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # --- Data manager ------------------------------------------------------------
@@ -730,19 +813,245 @@ def main() -> None:
             return lower.split(" ", 1)[1]
         return raw
 
-    def update_button_label(slot: str) -> None:
+    grid_layout = [
+        ["7", "8", "9"],
+        ["4", "5", "6"],
+        ["1", "2", "3"],
+    ]
+
+    overlay_win: tk.Toplevel | None = None
+    overlay_slot_canvases: dict[str, tk.Canvas] = {}
+    overlay_fill_rects: dict[str, int] = {}
+    overlay_icons: dict[str, ImageTk.PhotoImage | None] = {}
+    overlay_progress: dict[str, dict[str, object]] = {}
+    overlay_user_resized = {"val": False}
+
+    def _overlay_visible() -> bool:
+        return overlay_win is not None and overlay_win.winfo_exists() and overlay_win.state() != "withdrawn"
+
+    def _size_overlay_window(force: bool = False) -> None:
+        if overlay_win is None or not overlay_win.winfo_exists():
+            return
+        if overlay_user_resized["val"] and not force:
+            return
+        root.update_idletasks()
+        overlay_win.update_idletasks()
+        min_w = OVERLAY_ICON_SIZE[0] * 3 + 40
+        min_h = OVERLAY_ICON_SIZE[1] * 3 + 90
+        width = max(int(root.winfo_width() * 0.55), min_w)
+        height = max(int(root.winfo_height() * 0.55), min_h)
+        overlay_win.geometry(f"{width}x{height}")
+        _place_window_near(overlay_win, root)
+
+    def _ensure_overlay_window() -> None:
+        nonlocal overlay_win
+        if overlay_win is not None and overlay_win.winfo_exists():
+            return
+        overlay_slot_canvases.clear()
+        overlay_fill_rects.clear()
+        overlay_icons.clear()
+        overlay_win = tk.Toplevel(root, bg=BG)
+        overlay_win.withdraw()
+        overlay_win.title("Listening Overlay")
+        overlay_win.resizable(True, True)
+        overlay_win.attributes("-topmost", True)
+        overlay_win.attributes("-alpha", OVERLAY_ALPHA)
+        overlay_win.protocol("WM_DELETE_WINDOW", lambda: handle_overlay_close())
+
+        container = tk.Frame(overlay_win, bg=BG)
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+        auto_frame = tk.Frame(container, bg=BG)
+        auto_frame.pack(fill=tk.X, pady=(0, 8))
+        tk.Checkbutton(
+            auto_frame,
+            text="Auto Stratagem Panel",
+            variable=auto_panel_var,
+            bg=BG,
+            fg=FG,
+            activebackground=BUTTON_BG,
+            activeforeground=FG,
+            selectcolor=BG,
+            highlightthickness=0,
+            anchor="w",
+        ).pack(side=tk.LEFT, anchor="w")
+
+        grid = tk.Frame(container, bg=BG)
+        grid.pack(fill=tk.BOTH, expand=True)
+        for r, row in enumerate(grid_layout):
+            for c, slot in enumerate(row):
+                cell = tk.Frame(
+                    grid,
+                    width=OVERLAY_ICON_SIZE[0] + 12,
+                    height=OVERLAY_ICON_SIZE[1] + 12,
+                    bg=BG,
+                    highlightthickness=0,
+                    bd=0,
+                )
+                cell.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
+                cell.grid_propagate(False)
+                canvas = tk.Canvas(
+                    cell,
+                    width=OVERLAY_ICON_SIZE[0],
+                    height=OVERLAY_ICON_SIZE[1],
+                    bg=BG,
+                    highlightthickness=0,
+                    bd=0,
+                )
+                canvas.pack(expand=True)
+                overlay_slot_canvases[slot] = canvas
+                rect_id = canvas.create_rectangle(
+                    0,
+                    0,
+                    OVERLAY_ICON_SIZE[0],
+                    0,
+                    fill="#3a3a3a",
+                    outline="",
+                    stipple="gray50",
+                    tags="fill",
+                )
+                overlay_fill_rects[slot] = rect_id
+                grid.grid_columnconfigure(c, weight=1, uniform="overlay_slots")
+            grid.grid_rowconfigure(r, weight=1, uniform="overlay_slots")
+
+        _apply_dark_theme(overlay_win)
+        _set_dark_titlebar(overlay_win)
+        overlay_user_resized["val"] = False
+        overlay_win.bind(
+            "<Configure>",
+            lambda event=None: overlay_user_resized.__setitem__("val", True)  # noqa: ANN001
+            if overlay_win.state() != "withdrawn"
+            else None,
+        )
+        _size_overlay_window()
+
+    def _set_overlay_fill(slot: str, progress: float) -> None:
+        canvas = overlay_slot_canvases.get(slot)
+        rect_id = overlay_fill_rects.get(slot)
+        if canvas is None or rect_id is None:
+            return
+        progress = max(0.0, min(1.0, progress))
+        height = int(OVERLAY_ICON_SIZE[1] * progress)
+        canvas.coords(rect_id, 0, 0, OVERLAY_ICON_SIZE[0], height)
+        canvas.itemconfigure(rect_id, state=tk.NORMAL if height > 0 else tk.HIDDEN)
+
+    def update_overlay_slot(slot: str) -> None:
+        if overlay_win is None or not overlay_win.winfo_exists():
+            return
+        canvas = overlay_slot_canvases.get(slot)
+        if canvas is None:
+            return
         tpl = assignments.get(slot)
-        name = tpl.name if tpl else "Unassigned"
         hotkey = slot_hotkeys.get(slot, slot)
         hotkey_text = _display_hotkey_text(hotkey, slot)
+        icon: ImageTk.PhotoImage | None = None
+        if tpl:
+            icon = _load_icon_image(tpl.name, hotkey_text, variant="badge", size=OVERLAY_ICON_SIZE)
+        else:
+            icon = _build_overlay_placeholder(hotkey_text, size=OVERLAY_ICON_SIZE)
+        overlay_icons[slot] = icon
+        canvas.delete("icon")
+        canvas.create_image(
+            OVERLAY_ICON_SIZE[0] // 2,
+            OVERLAY_ICON_SIZE[1] // 2,
+            image=icon,
+            tags="icon",
+        )
+        _set_overlay_fill(slot, 0)
+
+    def refresh_overlay_slots() -> None:
+        if overlay_win is None or not overlay_win.winfo_exists():
+            return
+        for slot in assignments:
+            update_overlay_slot(slot)
+
+    def _cancel_overlay_progress(slot: str) -> None:
+        data = overlay_progress.pop(slot, None)
+        if data is None:
+            return
+        job = data.get("job")
+        if job is not None:
+            try:
+                root.after_cancel(job)
+            except Exception:
+                pass
+
+    def _tick_overlay_progress(slot: str) -> None:
+        data = overlay_progress.get(slot)
+        if data is None:
+            return
+        duration = float(data["duration"])
+        start_ts = float(data["start"])
+        elapsed = max(0.0, time.time() - start_ts)
+        progress = min(1.0, elapsed / duration) if duration > 0 else 1.0
+        _set_overlay_fill(slot, progress)
+        if progress >= 1.0:
+            _cancel_overlay_progress(slot)
+            _set_overlay_fill(slot, 0)
+            return
+        data["job"] = root.after(50, lambda s=slot: _tick_overlay_progress(s))
+
+    def start_overlay_progress(slot: str, total_time: float | None) -> None:
+        if overlay_win is None or not overlay_win.winfo_exists():
+            return
+        duration = max(total_time or 0.05, 0.05)
+        _cancel_overlay_progress(slot)
+        overlay_progress[slot] = {"start": time.time(), "duration": duration, "job": None}
+        _tick_overlay_progress(slot)
+
+    def stop_overlay_progress(slot: str) -> None:
+        _cancel_overlay_progress(slot)
+        _set_overlay_fill(slot, 0)
+
+    def handle_macro_progress(event: str, macro: Macro, slot: str | None, total_time: float | None) -> None:
+        if not slot:
+            return
+        if event == "start":
+            root.after(0, lambda s=slot, t=total_time: start_overlay_progress(s, t))
+        elif event == "stop":
+            root.after(0, lambda s=slot: stop_overlay_progress(s))
+
+    global _macro_progress_callback
+    _macro_progress_callback = handle_macro_progress
+
+    def show_overlay() -> None:
+        _ensure_overlay_window()
+        overlay_user_resized["val"] = False
+        _size_overlay_window(force=True)
+        refresh_overlay_slots()
+        if overlay_win is not None:
+            overlay_win.deiconify()
+            overlay_win.lift()
+            overlay_win.attributes("-topmost", True)
+
+    def hide_overlay() -> None:
+        if overlay_win is None or not overlay_win.winfo_exists():
+            return
+        overlay_win.withdraw()
+
+    def handle_overlay_close() -> None:
+        stop_listening()
+
+    def _on_root_configure(event=None) -> None:  # noqa: ANN001
+        if _overlay_visible():
+            _size_overlay_window()
+
+    root.bind("<Configure>", _on_root_configure)
+
+    def update_button_label(slot: str) -> None:
+        tpl = assignments.get(slot)
+        hotkey = slot_hotkeys.get(slot, slot)
+        hotkey_text = _display_hotkey_text(hotkey, slot)
+        icon: ImageTk.PhotoImage | None = None
         if tpl:
             icon = _load_icon_image(tpl.name, hotkey_text)
-            slot_icons[slot] = icon
-            if icon:
-                slot_buttons[slot].config(image=icon, text="", compound=tk.CENTER)
-                return
-        slot_icons[slot] = None
-        slot_buttons[slot].config(text=f"{hotkey_text}\n{name}", image="", compound=tk.NONE)
+        slot_icons[slot] = icon
+        if icon:
+            slot_buttons[slot].config(image=icon, text="", compound=tk.CENTER)
+        else:
+            name = tpl.name if tpl else "Unassigned"
+            slot_buttons[slot].config(text=f"{hotkey_text}\n{name}", image="", compound=tk.NONE)
+        update_overlay_slot(slot)
 
     def update_all_buttons() -> None:
         for slot in assignments:
@@ -758,6 +1067,7 @@ def main() -> None:
 
     def rebuild_listeners() -> None:
         manager.clear()
+        _slot_hotkey_lookup.clear()
         if not listening:
             return
         for slot, _ in NUMPAD_SLOTS:
@@ -765,6 +1075,7 @@ def main() -> None:
             tpl = assignments.get(slot)
             if tpl is None or not hotkey:
                 continue
+            _slot_hotkey_lookup[hotkey.lower()] = slot
             try:
                 manager.add_macro(
                     Macro(
@@ -811,12 +1122,6 @@ def main() -> None:
 
     grid_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
 
-    grid_layout = [
-        ["7", "8", "9"],
-        ["4", "5", "6"],
-        ["1", "2", "3"],
-    ]
-
     for r, row in enumerate(grid_layout):
         for c, slot in enumerate(row):
             cell = tk.Frame(grid_frame, width=SLOT_WIDTH, height=SLOT_HEIGHT, bg=BG, highlightthickness=0, bd=0)
@@ -837,19 +1142,34 @@ def main() -> None:
 
     status_var = tk.StringVar(value="Not listening. Assign macros, then start listening.")
 
-    def toggle_listening() -> None:
+    def stop_listening() -> None:
         nonlocal listening
-        listening = not listening
+        if not listening:
+            hide_overlay()
+            return
+        listening = False
+        manager.clear()
+        listen_btn.config(text="Start Listening")
+        status_var.set("Not listening. Assign macros, then start listening.")
+        log("Listener OFF.")
+        hide_overlay()
+
+    def start_listening() -> None:
+        nonlocal listening
         if listening:
-            rebuild_listeners()
-            listen_btn.config(text="Stop Listening")
-            status_var.set("Listening for numpad keys (7 8 9 / 4 5 6 / 1 2 3).")
-            log("Listener ON: waiting for assigned hotkeys.")
+            return
+        listening = True
+        rebuild_listeners()
+        listen_btn.config(text="Stop Listening")
+        status_var.set("Listening for numpad keys (7 8 9 / 4 5 6 / 1 2 3).")
+        log("Listener ON: waiting for assigned hotkeys.")
+        show_overlay()
+
+    def toggle_listening() -> None:
+        if listening:
+            stop_listening()
         else:
-            manager.clear()
-            listen_btn.config(text="Start Listening")
-            status_var.set("Not listening. Assign macros, then start listening.")
-            log("Listener OFF.")
+            start_listening()
 
     listen_btn = tk.Button(controls_frame, text="Start Listening", command=toggle_listening)
     listen_btn.pack(side=tk.LEFT, padx=(0, 8))
@@ -1602,12 +1922,19 @@ def main() -> None:
     exit_handle: int | None = None
 
     def close_app() -> None:
-        nonlocal exit_handle
+        nonlocal exit_handle, overlay_win
         if exit_handle is not None:
             keyboard.remove_hotkey(exit_handle)
             exit_handle = None
         manager.clear()
         clear_log_callback()
+        if overlay_win is not None and overlay_win.winfo_exists():
+            overlay_win.destroy()
+            overlay_win = None
+        global _macro_progress_callback
+        _macro_progress_callback = None
+        for slot in list(overlay_progress.keys()):
+            _cancel_overlay_progress(slot)
         root.destroy()
 
     def attempt_exit() -> None:

@@ -1,0 +1,34 @@
+{
+  "slots": {
+    "7": "Orbital Walking Barrage",
+    "8": null,
+    "9": null,
+    "4": null,
+    "5": null,
+    "6": null,
+    "1": null,
+    "2": null,
+    "3": null
+  },
+  "hotkeys": {
+    "7": "num 7",
+    "8": "num 8",
+    "9": "num 9",
+    "4": "num 4",
+    "5": "num 5",
+    "6": "num 6",
+    "1": "num 1",
+    "2": "num 2",
+    "3": "num 3"
+  },
+  "direction_keys": {
+    "Up": "up",
+    "Down": "down",
+    "Left": "left",
+    "Right": "right"
+  },
+  "timing": {
+    "delay": 0.05,
+    "duration": 0.05
+  }
+}

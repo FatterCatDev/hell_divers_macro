@@ -1,0 +1,29 @@
+# Python caches and compiled artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build/distribution output
+build/
+dist/
+*.egg-info/
+*.spec
+*.exe
+
+# App runtime data
+saves/
+temp_main_lines.txt
+
+# Logs and editor/OS noise
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Tuple
 
-from config import DEFAULT_DELAY, DEFAULT_DURATION
+from .config import DEFAULT_DELAY, DEFAULT_DURATION
 
 
 @dataclass(frozen=True)

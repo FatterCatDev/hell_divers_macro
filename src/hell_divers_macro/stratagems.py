@@ -1,8 +1,8 @@
 from typing import Dict, Tuple
 
-from config import DEFAULT_DELAY, DEFAULT_DIRECTION_KEYS, DEFAULT_DURATION
-from models import MacroTemplate
-from paths import stratagem_md_path
+from .config import DEFAULT_DELAY, DEFAULT_DIRECTION_KEYS, DEFAULT_DURATION
+from .models import MacroTemplate
+from .paths import stratagem_md_path
 
 
 def load_stratagem_templates() -> Tuple[MacroTemplate, ...]:

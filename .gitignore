@@ -15,6 +15,7 @@ dist/
 *.egg-info/
 *.spec
 *.exe
+!packaging/*.spec
 
 # App runtime data
 saves/

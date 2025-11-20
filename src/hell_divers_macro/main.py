@@ -5,10 +5,10 @@ grid, customize hotkeys/direction keys, and save/load profiles.
 
 from __future__ import annotations
 
-import platform
 import io
 import json
 import re
+import platform
 import threading
 import time
 from pathlib import Path
@@ -20,7 +20,11 @@ from tkinter import filedialog, messagebox
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import sys
 
-from config import (
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    __package__ = "hell_divers_macro"
+
+from .config import (
     DEFAULT_DELAY,
     DEFAULT_DURATION,
     DEFAULT_DIRECTION_KEYS,
@@ -28,10 +32,10 @@ from config import (
     EXIT_HOTKEY,
     NUMPAD_SLOTS,
 )
-from log_utils import clear_log_callback, log, set_log_callback
-from models import Macro, MacroRecord, MacroTemplate
-from paths import ensure_saves_dir
-from stratagems import load_stratagem_templates, resolve_template_keys
+from .log_utils import clear_log_callback, log, set_log_callback
+from .models import Macro, MacroRecord, MacroTemplate
+from .paths import ensure_saves_dir
+from .stratagems import load_stratagem_templates, resolve_template_keys
 
 _macro_lock = threading.Lock()
 
@@ -47,7 +51,7 @@ IS_WINDOWS = platform.system() == "Windows"
 ICON_SIZE = (120, 110)
 SLOT_WIDTH = 160
 SLOT_HEIGHT = 150
-ASSETS_DIR = Path(__file__).parent / "assets"
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 _cairosvg_mod = None
 _cairosvg_error = None

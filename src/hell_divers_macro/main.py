@@ -30,6 +30,8 @@ from hell_divers_macro.config import (
     DEFAULT_AUTO_PANEL,
     DEFAULT_DIRECTION_KEYS,
     DEFAULT_PANEL_KEY,
+    DEFAULT_OVERLAY_LOCK_KEY,
+    DEFAULT_OVERLAY_OPACITY,
     DEFAULT_SLOT_HOTKEYS,
     EXIT_HOTKEY,
     NUMPAD_SLOTS,
@@ -59,7 +61,7 @@ ICON_SIZE = (120, 110)
 SLOT_WIDTH = 160
 SLOT_HEIGHT = 150
 OVERLAY_ICON_SIZE = (96, 88)
-OVERLAY_ALPHA = 0.82
+OVERLAY_ALPHA = DEFAULT_OVERLAY_OPACITY
 
 
 def _resolve_assets_dir() -> Path:
@@ -267,6 +269,63 @@ def _set_dark_titlebar(win: tk.Tk | tk.Toplevel) -> None:
         _set_color_attr(35, BG)  # DWMWA_CAPTION_COLOR
         _set_color_attr(36, FG)  # DWMWA_TEXT_COLOR
     except Exception:
+        pass
+
+
+def _make_window_clickthrough(win: tk.Tk | tk.Toplevel, alpha: float | None = None, clickthrough: bool = True) -> None:
+    """On Windows, control focus and mouse passthrough for a window."""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        try:
+            win.update_idletasks()
+        except tk.TclError:
+            pass
+        hwnd = wintypes.HWND(win.winfo_id())
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        WS_EX_TRANSPARENT = 0x00000020
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_NOACTIVATE = 0x08000000
+
+        # Ensure we are setting styles on the real root window handle.
+        GA_ROOT = 2
+        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+        if root_hwnd:
+            hwnd = wintypes.HWND(root_hwnd)
+
+        current_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        new_style = current_style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+        if clickthrough:
+            new_style |= WS_EX_TRANSPARENT
+        else:
+            new_style &= ~WS_EX_TRANSPARENT
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
+
+        if alpha is not None:
+            clamped = max(0.0, min(1.0, alpha))
+            user32.SetLayeredWindowAttributes(hwnd, 0, int(clamped * 255), 0x2)
+
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        SWP_FRAMECHANGED = 0x0020
+        SWP_NOACTIVATE = 0x0010
+        user32.SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+        )
+    except Exception:
+        # If any ctypes call fails, leave the window unchanged.
         pass
 
 
@@ -782,6 +841,19 @@ def main() -> None:
     saved_state: dict = {}
     macro_timing = {"delay": DEFAULT_DELAY, "duration": DEFAULT_DURATION}
     panel_key_display = tk.StringVar(value="")
+    overlay_lock_key: str = DEFAULT_OVERLAY_LOCK_KEY
+    overlay_locked = {"val": True}
+    overlay_opacity = tk.DoubleVar(value=OVERLAY_ALPHA)
+    overlay_lock_handle: int | None = None
+    overlay_drag_state = {"x": 0, "y": 0}
+    overlay_lock_display = tk.StringVar(value="")
+    overlay_resize_state = {"x": 0, "y": 0, "w": 0, "h": 0}
+    overlay_resize_handle: tk.Canvas | None = None
+    overlay_resizing = {"val": False}
+    overlay_auto_panel_check: tk.Checkbutton | None = None
+    overlay_close_btn: tk.Button | None = None
+    overlay_lock_label: tk.Label | None = None
+    overlay_header_right: tk.Frame | None = None
 
     def sync_auto_panel_state() -> None:
         _auto_panel_state["key"] = panel_key
@@ -794,6 +866,10 @@ def main() -> None:
             "direction_keys": dict(direction_keys),
             "timing": {"delay": macro_timing["delay"], "duration": macro_timing["duration"]},
             "panel": {"key": panel_key, "auto": bool(auto_panel_var.get())},
+            "overlay": {
+                "lock_key": overlay_lock_key,
+                "opacity": _clamp_opacity(overlay_opacity.get()),
+            },
         }
 
     def has_unsaved_changes() -> bool:
@@ -813,11 +889,77 @@ def main() -> None:
             return lower.split(" ", 1)[1]
         return raw
 
+    def _clamp_opacity(val: float) -> float:
+        try:
+            return max(0.1, min(1.0, float(val)))
+        except Exception:
+            return OVERLAY_ALPHA
+
+    def _update_overlay_lock_display() -> None:
+        key_text = _display_hotkey_text(overlay_lock_key or "Unset", overlay_lock_key or "Unset")
+        state = "Locked" if overlay_locked["val"] else "Unlocked"
+        overlay_lock_display.set(f"Overlay: {state} (Key: {key_text})")
+
+    def _hide_widget(widget: tk.Widget | None) -> None:
+        if widget is None:
+            return
+        try:
+            if widget.winfo_manager():
+                widget.pack_forget()
+        except tk.TclError:
+            pass
+
+    def _show_widget(widget: tk.Widget | None, **pack_kwargs) -> None:
+        if widget is None:
+            return
+        try:
+            if widget.winfo_manager() != "pack":
+                widget.pack(**pack_kwargs)
+        except tk.TclError:
+            pass
+
+    def _update_overlay_header_visibility() -> None:
+        # Left: auto-panel toggle (only when unlocked)
+        if overlay_auto_panel_check is not None:
+            try:
+                overlay_auto_panel_check.pack_forget()
+                if not overlay_locked["val"]:
+                    overlay_auto_panel_check.pack(side=tk.LEFT, anchor="w")
+            except tk.TclError:
+                pass
+        # Right frame always present for consistent order.
+        if overlay_header_right is not None:
+            try:
+                if overlay_header_right.winfo_manager() != "pack":
+                    overlay_header_right.pack(side=tk.RIGHT)
+            except tk.TclError:
+                pass
+        if overlay_close_btn is not None:
+            try:
+                overlay_close_btn.pack_forget()
+                if not overlay_locked["val"]:
+                    overlay_close_btn.pack(side=tk.RIGHT, padx=(6, 0))
+            except tk.TclError:
+                pass
+        if overlay_lock_label is not None:
+            try:
+                overlay_lock_label.pack_forget()
+                if overlay_locked["val"]:
+                    overlay_lock_label.pack(side=tk.RIGHT, padx=(0, 6), anchor="e")
+                else:
+                    # Pack close first (above) so label lands to its left.
+                    overlay_lock_label.pack(side=tk.RIGHT, padx=(0, 6), anchor="e")
+            except tk.TclError:
+                pass
+
     grid_layout = [
         ["7", "8", "9"],
         ["4", "5", "6"],
         ["1", "2", "3"],
     ]
+
+    def _overlay_min_sizes() -> tuple[int, int]:
+        return (OVERLAY_ICON_SIZE[0] * 3 + 40, OVERLAY_ICON_SIZE[1] * 3 + 90)
 
     overlay_win: tk.Toplevel | None = None
     overlay_slot_canvases: dict[str, tk.Canvas] = {}
@@ -825,6 +967,114 @@ def main() -> None:
     overlay_icons: dict[str, ImageTk.PhotoImage | None] = {}
     overlay_progress: dict[str, dict[str, object]] = {}
     overlay_user_resized = {"val": False}
+
+    def _apply_overlay_window_config() -> None:
+        if overlay_win is None or not overlay_win.winfo_exists():
+            return
+        opacity = _clamp_opacity(overlay_opacity.get())
+        overlay_opacity.set(opacity)
+        try:
+            overlay_win.attributes("-topmost", True)
+            overlay_win.attributes("-alpha", opacity)
+        except tk.TclError:
+            pass
+        _make_window_clickthrough(overlay_win, alpha=opacity, clickthrough=overlay_locked["val"])
+        try:
+            overlay_win.configure(cursor="" if overlay_locked["val"] else "fleur")
+        except tk.TclError:
+            pass
+        if overlay_resize_handle is not None:
+            try:
+                overlay_resize_handle.configure(cursor="size_nw_se" if not overlay_locked["val"] else "")
+            except tk.TclError:
+                pass
+        _update_overlay_lock_display()
+        _update_overlay_header_visibility()
+
+    def _start_overlay_drag(event) -> None:  # noqa: ANN001
+        if (
+            overlay_locked["val"]
+            or overlay_resizing["val"]
+            or overlay_win is None
+            or not overlay_win.winfo_exists()
+        ):
+            return
+        if overlay_resize_handle is not None and event.widget is overlay_resize_handle:
+            return
+        overlay_drag_state["x"] = event.x_root
+        overlay_drag_state["y"] = event.y_root
+
+    def _drag_overlay(event) -> None:  # noqa: ANN001
+        if (
+            overlay_locked["val"]
+            or overlay_resizing["val"]
+            or overlay_win is None
+            or not overlay_win.winfo_exists()
+        ):
+            return
+        dx = event.x_root - overlay_drag_state["x"]
+        dy = event.y_root - overlay_drag_state["y"]
+        overlay_drag_state["x"] = event.x_root
+        overlay_drag_state["y"] = event.y_root
+        try:
+            new_x = overlay_win.winfo_x() + dx
+            new_y = overlay_win.winfo_y() + dy
+            overlay_win.geometry(f"+{new_x}+{new_y}")
+            overlay_user_resized["val"] = True
+        except tk.TclError:
+            pass
+
+    def _start_overlay_resize(event) -> None:  # noqa: ANN001
+        if overlay_locked["val"] or overlay_win is None or not overlay_win.winfo_exists():
+            return
+        overlay_resizing["val"] = True
+        overlay_resize_state["x"] = event.x_root
+        overlay_resize_state["y"] = event.y_root
+        overlay_resize_state["w"] = overlay_win.winfo_width()
+        overlay_resize_state["h"] = overlay_win.winfo_height()
+
+    def _resize_overlay(event) -> None:  # noqa: ANN001
+        if overlay_locked["val"] or overlay_win is None or not overlay_win.winfo_exists():
+            return
+        dx = event.x_root - overlay_resize_state["x"]
+        dy = event.y_root - overlay_resize_state["y"]
+        new_w = max(_overlay_min_sizes()[0], overlay_resize_state["w"] + dx)
+        new_h = max(_overlay_min_sizes()[1], overlay_resize_state["h"] + dy)
+        try:
+            overlay_win.geometry(f"{new_w}x{new_h}+{overlay_win.winfo_x()}+{overlay_win.winfo_y()}")
+            overlay_user_resized["val"] = True
+        except tk.TclError:
+            pass
+
+    def _stop_overlay_resize(event=None) -> None:  # noqa: ANN001
+        overlay_resizing["val"] = False
+
+    def toggle_overlay_lock() -> None:
+        overlay_locked["val"] = not overlay_locked["val"]
+        state = "locked" if overlay_locked["val"] else "unlocked (drag to move)"
+        _apply_overlay_window_config()
+        _update_overlay_lock_display()
+        _update_overlay_header_visibility()
+        status_var.set(f"Overlay {state}.")
+        log(f"Overlay {state}.")
+
+    def register_overlay_lock_hotkey() -> None:
+        nonlocal overlay_lock_handle
+        if overlay_lock_handle is not None:
+            try:
+                keyboard.remove_hotkey(overlay_lock_handle)
+            except Exception:
+                pass
+            overlay_lock_handle = None
+        key = (overlay_lock_key or "").strip()
+        if not key:
+            return
+        try:
+            overlay_lock_handle = keyboard.add_hotkey(
+                key, lambda: root.after(0, toggle_overlay_lock), suppress=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            log(f"Could not register overlay lock hotkey '{key}': {exc}")
 
     def _overlay_visible() -> bool:
         return overlay_win is not None and overlay_win.winfo_exists() and overlay_win.state() != "withdrawn"
@@ -836,15 +1086,14 @@ def main() -> None:
             return
         root.update_idletasks()
         overlay_win.update_idletasks()
-        min_w = OVERLAY_ICON_SIZE[0] * 3 + 40
-        min_h = OVERLAY_ICON_SIZE[1] * 3 + 90
+        min_w, min_h = _overlay_min_sizes()
         width = max(int(root.winfo_width() * 0.55), min_w)
         height = max(int(root.winfo_height() * 0.55), min_h)
         overlay_win.geometry(f"{width}x{height}")
         _place_window_near(overlay_win, root)
 
     def _ensure_overlay_window() -> None:
-        nonlocal overlay_win
+        nonlocal overlay_win, overlay_resize_handle, overlay_auto_panel_check, overlay_close_btn, overlay_lock_label, overlay_header_right
         if overlay_win is not None and overlay_win.winfo_exists():
             return
         overlay_slot_canvases.clear()
@@ -852,18 +1101,23 @@ def main() -> None:
         overlay_icons.clear()
         overlay_win = tk.Toplevel(root, bg=BG)
         overlay_win.withdraw()
+        overlay_win.overrideredirect(True)
         overlay_win.title("Listening Overlay")
         overlay_win.resizable(True, True)
         overlay_win.attributes("-topmost", True)
-        overlay_win.attributes("-alpha", OVERLAY_ALPHA)
+        _apply_overlay_window_config()
         overlay_win.protocol("WM_DELETE_WINDOW", lambda: handle_overlay_close())
+        overlay_win.bind("<Map>", lambda event=None: _apply_overlay_window_config())
+        overlay_win.bind("<ButtonPress-1>", _start_overlay_drag)
+        overlay_win.bind("<B1-Motion>", _drag_overlay)
+        overlay_win.bind("<ButtonRelease-1>", _stop_overlay_resize)
 
         container = tk.Frame(overlay_win, bg=BG)
         container.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
 
         auto_frame = tk.Frame(container, bg=BG)
         auto_frame.pack(fill=tk.X, pady=(0, 8))
-        tk.Checkbutton(
+        overlay_auto_panel_check = tk.Checkbutton(
             auto_frame,
             text="Auto Stratagem Panel",
             variable=auto_panel_var,
@@ -874,7 +1128,22 @@ def main() -> None:
             selectcolor=BG,
             highlightthickness=0,
             anchor="w",
-        ).pack(side=tk.LEFT, anchor="w")
+        )
+        overlay_header_right = tk.Frame(auto_frame, bg=BG)
+        overlay_header_right.pack(side=tk.RIGHT)
+        overlay_close_btn = tk.Button(
+            overlay_header_right,
+            text="X",
+            command=lambda: root.after(0, stop_listening),
+            width=2,
+            bg=BUTTON_BG,
+            fg=FG,
+            activebackground=BUTTON_ACTIVE,
+            activeforeground=FG,
+            bd=0,
+            highlightthickness=0,
+        )
+        overlay_lock_label = tk.Label(overlay_header_right, textvariable=overlay_lock_display, anchor="e")
 
         grid = tk.Frame(container, bg=BG)
         grid.pack(fill=tk.BOTH, expand=True)
@@ -924,6 +1193,14 @@ def main() -> None:
             else None,
         )
         _size_overlay_window()
+
+        overlay_resize_handle = tk.Canvas(container, width=16, height=16, bg=BG, bd=0, highlightthickness=0)
+        overlay_resize_handle.place(relx=1.0, rely=1.0, anchor="se")
+        overlay_resize_handle.create_polygon(0, 16, 16, 16, 16, 0, fill=ACCENT, outline="")
+        overlay_resize_handle.bind("<ButtonPress-1>", _start_overlay_resize)
+        overlay_resize_handle.bind("<B1-Motion>", _resize_overlay)
+        overlay_resize_handle.bind("<ButtonRelease-1>", _stop_overlay_resize)
+        _update_overlay_header_visibility()
 
     def _set_overlay_fill(slot: str, progress: float) -> None:
         canvas = overlay_slot_canvases.get(slot)
@@ -1016,10 +1293,12 @@ def main() -> None:
 
     def show_overlay() -> None:
         _ensure_overlay_window()
-        overlay_user_resized["val"] = False
-        _size_overlay_window(force=True)
+        if not overlay_user_resized["val"]:
+            _size_overlay_window(force=True)
+        _update_overlay_lock_display()
         refresh_overlay_slots()
         if overlay_win is not None:
+            _apply_overlay_window_config()
             overlay_win.deiconify()
             overlay_win.lift()
             overlay_win.attributes("-topmost", True)
@@ -1176,6 +1455,8 @@ def main() -> None:
 
     status_label = tk.Label(controls_frame, textvariable=status_var, anchor="w")
     status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    _update_overlay_lock_display()
+    register_overlay_lock_hotkey()
 
     log_frame = tk.Frame(root)
     log_frame.pack(fill=tk.BOTH, expand=False, padx=16, pady=(0, 8))
@@ -1207,11 +1488,16 @@ def main() -> None:
         dir_buttons: dict[str, tk.Button] = {}
         dir_labels: dict[str, tk.Label] = {}
         panel_change_btn: tk.Button | None = None
+        overlay_lock_btn: tk.Button | None = None
         panel_key_label_var = tk.StringVar(value=_display_hotkey_text(panel_key, panel_key))
+        overlay_lock_label_var = tk.StringVar(value=_display_hotkey_text(overlay_lock_key, overlay_lock_key))
+        overlay_opacity_label_var = tk.StringVar(value=f"{int(_clamp_opacity(overlay_opacity.get()) * 100)}%")
         capturing = {"active": False}
         pending_hotkeys: dict[str, str] = dict(slot_hotkeys)
         pending_direction_keys: dict[str, str] = dict(direction_keys)
         pending_panel_key = panel_key
+        pending_overlay_lock_key = overlay_lock_key
+        pending_overlay_opacity = tk.DoubleVar(value=_clamp_opacity(overlay_opacity.get()))
 
         tabs_frame = tk.Frame(settings)
         tabs_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
@@ -1223,6 +1509,7 @@ def main() -> None:
         dir_section = tk.Frame(content_frame)
         delay_section = tk.Frame(content_frame)
         panel_section = tk.Frame(content_frame)
+        overlay_section = tk.Frame(content_frame)
 
         active_values = {"delay": macro_timing["delay"], "duration": macro_timing["duration"]}
 
@@ -1235,6 +1522,8 @@ def main() -> None:
                 or active_values["delay"] != macro_timing["delay"]
                 or active_values["duration"] != macro_timing["duration"]
                 or pending_panel_key != panel_key
+                or pending_overlay_lock_key != overlay_lock_key
+                or abs(_clamp_opacity(pending_overlay_opacity.get()) - _clamp_opacity(overlay_opacity.get())) > 1e-4
             )
 
         def refresh_labels() -> None:
@@ -1243,12 +1532,16 @@ def main() -> None:
             for direction, label in dir_labels.items():
                 label.config(text=pending_direction_keys.get(direction, ""))
             panel_key_label_var.set(_display_hotkey_text(pending_panel_key, pending_panel_key))
+            overlay_lock_label_var.set(_display_hotkey_text(pending_overlay_lock_key, pending_overlay_lock_key))
+            overlay_opacity_label_var.set(f"{int(_clamp_opacity(pending_overlay_opacity.get()) * 100)}%")
             settings.update_idletasks()
 
         def _all_capture_buttons() -> list[tk.Button]:
             buttons: list[tk.Button] = list(change_buttons.values()) + list(dir_buttons.values())
             if panel_change_btn is not None:
                 buttons.append(panel_change_btn)
+            if overlay_lock_btn is not None:
+                buttons.append(overlay_lock_btn)
             return buttons
 
         def finish_capture(
@@ -1265,9 +1558,12 @@ def main() -> None:
                 elif kind == "direction":
                     pending_direction_keys[target] = new_key
                     status_local.set(f"{target} pending bind to '{new_key}'. Click Apply to confirm.")
-                else:
+                elif kind == "panel":
                     pending_panel_key = new_key
                     status_local.set(f"Stratagem Panel pending bind to '{new_key}'. Click Apply to confirm.")
+                else:
+                    pending_overlay_lock_key = new_key
+                    status_local.set(f"Overlay lock toggle pending bind to '{new_key}'. Click Apply to confirm.")
                 refresh_labels()
             elif error:
                 status_local.set(error)
@@ -1284,13 +1580,14 @@ def main() -> None:
             was_listening = listening
             if was_listening:
                 manager.clear()
-            prompt = (
-                f"Press a key to bind to numpad {target}..."
-                if kind == "slot"
-                else f"Press a key to bind to {target} direction..."
-                if kind == "direction"
-                else "Press a key to open the Stratagem Panel..."
-            )
+            if kind == "slot":
+                prompt = f"Press a key to bind to numpad {target}..."
+            elif kind == "direction":
+                prompt = f"Press a key to bind to {target} direction..."
+            elif kind == "panel":
+                prompt = "Press a key to open the Stratagem Panel..."
+            else:
+                prompt = "Press a key to toggle the Overlay Lock..."
             status_local.set(prompt)
             for btn in _all_capture_buttons():
                 btn.config(state=tk.DISABLED)
@@ -1308,27 +1605,36 @@ def main() -> None:
             threading.Thread(target=worker, daemon=True).start()
 
         def apply_and_stay() -> None:
-            nonlocal panel_key
+            nonlocal panel_key, overlay_lock_key
             slot_hotkeys.update(pending_hotkeys)
             direction_keys.update(pending_direction_keys)
             macro_timing["delay"] = active_values["delay"]
             macro_timing["duration"] = active_values["duration"]
             panel_key = pending_panel_key
+            overlay_lock_key = pending_overlay_lock_key
+            overlay_opacity.set(_clamp_opacity(pending_overlay_opacity.get()))
             refresh_panel_key_display()
             sync_auto_panel_state()
+            register_overlay_lock_hotkey()
+            _update_overlay_lock_display()
+            _apply_overlay_window_config()
             update_all_buttons()
             if listening:
                 rebuild_listeners()
-            status_local.set("Applied bindings.")
+            status_local.set("Applied bindings and overlay settings.")
 
         def reset_pending_from_live() -> None:
-            nonlocal pending_panel_key
+            nonlocal pending_panel_key, pending_overlay_lock_key
             pending_hotkeys.clear()
             pending_hotkeys.update(slot_hotkeys)
             pending_direction_keys.clear()
             pending_direction_keys.update(direction_keys)
             pending_panel_key = panel_key
             panel_key_label_var.set(_display_hotkey_text(pending_panel_key, pending_panel_key))
+            pending_overlay_lock_key = overlay_lock_key
+            overlay_lock_label_var.set(_display_hotkey_text(pending_overlay_lock_key, pending_overlay_lock_key))
+            pending_overlay_opacity.set(_clamp_opacity(overlay_opacity.get()))
+            opacity_scale.set(pending_overlay_opacity.get())
             active_values["delay"] = macro_timing["delay"]
             active_values["duration"] = macro_timing["duration"]
             refresh_labels()
@@ -1342,35 +1648,25 @@ def main() -> None:
                 else:
                     reset_pending_from_live()
             # hide all
-            for frame in (slot_section, dir_section, delay_section, panel_section):
+            for frame in (slot_section, dir_section, delay_section, panel_section, overlay_section):
                 frame.pack_forget()
-            # show target
+            for btn in (slot_btn, dir_btn, panel_btn, delay_btn, overlay_btn):
+                btn.config(relief=tk.RAISED)
             if target == "slot":
                 slot_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
                 slot_btn.config(relief=tk.SUNKEN)
-                dir_btn.config(relief=tk.RAISED)
-                delay_btn.config(relief=tk.RAISED)
-                panel_btn.config(relief=tk.RAISED)
+            elif target == "direction":
+                dir_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+                dir_btn.config(relief=tk.SUNKEN)
+            elif target == "panel":
+                panel_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+                panel_btn.config(relief=tk.SUNKEN)
+            elif target == "overlay":
+                overlay_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+                overlay_btn.config(relief=tk.SUNKEN)
             else:
-                if target == "direction":
-                    dir_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-                    dir_btn.config(relief=tk.SUNKEN)
-                    slot_btn.config(relief=tk.RAISED)
-                    delay_btn.config(relief=tk.RAISED)
-                    panel_btn.config(relief=tk.RAISED)
-                else:
-                    if target == "panel":
-                        panel_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-                        panel_btn.config(relief=tk.SUNKEN)
-                        slot_btn.config(relief=tk.RAISED)
-                        dir_btn.config(relief=tk.RAISED)
-                        delay_btn.config(relief=tk.RAISED)
-                    else:
-                        delay_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-                        delay_btn.config(relief=tk.SUNKEN)
-                        slot_btn.config(relief=tk.RAISED)
-                        dir_btn.config(relief=tk.RAISED)
-                        panel_btn.config(relief=tk.RAISED)
+                delay_section.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+                delay_btn.config(relief=tk.SUNKEN)
             current_category["val"] = target
             settings.update_idletasks()
 
@@ -1382,6 +1678,8 @@ def main() -> None:
         dir_btn.pack(side=tk.LEFT)
         panel_btn.pack(side=tk.LEFT, padx=(6, 6))
         delay_btn.pack(side=tk.LEFT)
+        overlay_btn = tk.Button(tabs_frame, text="Overlay", command=lambda: switch_category("overlay"))
+        overlay_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         # Build slot section
         for slot, _ in NUMPAD_SLOTS:
@@ -1415,6 +1713,41 @@ def main() -> None:
         panel_label.pack(side=tk.LEFT, padx=(0, 6))
         panel_change_btn = tk.Button(row, text="Change", command=lambda: start_capture("panel", "panel"))
         panel_change_btn.pack(side=tk.LEFT)
+
+        # Build overlay section
+        row_overlay = tk.Frame(overlay_section)
+        row_overlay.pack(fill=tk.X, pady=4)
+        tk.Label(row_overlay, text="Overlay Lock Key", width=18, anchor="w").pack(side=tk.LEFT)
+        tk.Label(row_overlay, textvariable=overlay_lock_label_var, width=12, anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        overlay_lock_btn = tk.Button(row_overlay, text="Change", command=lambda: start_capture("overlay_lock", "overlay_lock"))
+        overlay_lock_btn.pack(side=tk.LEFT)
+
+        tk.Label(overlay_section, text="Overlay Opacity", anchor="w").pack(fill=tk.X, pady=(12, 4))
+        op_row = tk.Frame(overlay_section)
+        op_row.pack(fill=tk.X, pady=(0, 8))
+        opacity_scale = tk.Scale(
+            op_row,
+            from_=0.3,
+            to=1.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            showvalue=False,
+            length=200,
+            bg=BG,
+            fg=FG,
+            troughcolor=BUTTON_BG,
+            highlightthickness=0,
+            command=lambda v: None,
+        )
+        opacity_scale.set(pending_overlay_opacity.get())
+        opacity_scale.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(op_row, textvariable=overlay_opacity_label_var, width=6, anchor="w").pack(side=tk.LEFT)
+
+        def on_overlay_opacity_change(val: str) -> None:
+            pending_overlay_opacity.set(_clamp_opacity(float(val)))
+            overlay_opacity_label_var.set(f"{int(_clamp_opacity(float(val)) * 100)}%")
+
+        opacity_scale.config(command=on_overlay_opacity_change)
 
         # Build delay section
         tk.Label(delay_section, text="Milliseconds between key presses:", anchor="w").pack(
@@ -1632,7 +1965,7 @@ def main() -> None:
             saved_state = serialize_state()
 
     def _load_profile_from_path(path: Path, show_messages: bool = True) -> bool:
-        nonlocal saved_state, panel_key
+        nonlocal saved_state, panel_key, overlay_lock_key
         try:
             with path.open("r", encoding="utf-8") as fh:
                 content = json.load(fh)
@@ -1706,6 +2039,23 @@ def main() -> None:
         else:
             panel_key = DEFAULT_PANEL_KEY
             auto_panel_var.set(DEFAULT_AUTO_PANEL)
+        overlay_data = content.get("overlay")
+        if isinstance(overlay_data, dict):
+            lock_val = overlay_data.get("lock_key")
+            if isinstance(lock_val, str) and lock_val.strip():
+                overlay_lock_key = lock_val.strip()
+            op_val = overlay_data.get("opacity", OVERLAY_ALPHA)
+            try:
+                overlay_opacity.set(_clamp_opacity(float(op_val)))
+            except (TypeError, ValueError):
+                overlay_opacity.set(OVERLAY_ALPHA)
+        else:
+            overlay_lock_key = DEFAULT_OVERLAY_LOCK_KEY
+            overlay_opacity.set(OVERLAY_ALPHA)
+        overlay_locked["val"] = True
+        register_overlay_lock_hotkey()
+        _update_overlay_lock_display()
+        _apply_overlay_window_config()
         refresh_panel_key_display()
         sync_auto_panel_state()
 
@@ -1738,7 +2088,7 @@ def main() -> None:
 
     def load_blank_profile(show_messages: bool = True) -> None:
         """Reset to defaults and clear last-profile marker."""
-        nonlocal saved_state, panel_key
+        nonlocal saved_state, panel_key, overlay_lock_key
         assignments.clear()
         assignments.update({slot: None for slot, _ in NUMPAD_SLOTS})
         slot_hotkeys.clear()
@@ -1746,12 +2096,18 @@ def main() -> None:
         direction_keys.clear()
         direction_keys.update(DEFAULT_DIRECTION_KEYS)
         panel_key = DEFAULT_PANEL_KEY
+        overlay_lock_key = DEFAULT_OVERLAY_LOCK_KEY
+        overlay_locked["val"] = True
+        overlay_opacity.set(OVERLAY_ALPHA)
         auto_panel_var.set(DEFAULT_AUTO_PANEL)
         macro_timing["delay"] = DEFAULT_DELAY
         macro_timing["duration"] = DEFAULT_DURATION
         update_all_buttons()
         refresh_panel_key_display()
         sync_auto_panel_state()
+        register_overlay_lock_hotkey()
+        _update_overlay_lock_display()
+        _apply_overlay_window_config()
         if listening:
             rebuild_listeners()
         saved_state = serialize_state()
@@ -1922,10 +2278,16 @@ def main() -> None:
     exit_handle: int | None = None
 
     def close_app() -> None:
-        nonlocal exit_handle, overlay_win
+        nonlocal exit_handle, overlay_win, overlay_lock_handle
         if exit_handle is not None:
             keyboard.remove_hotkey(exit_handle)
             exit_handle = None
+        if overlay_lock_handle is not None:
+            try:
+                keyboard.remove_hotkey(overlay_lock_handle)
+            except Exception:
+                pass
+            overlay_lock_handle = None
         manager.clear()
         clear_log_callback()
         if overlay_win is not None and overlay_win.winfo_exists():

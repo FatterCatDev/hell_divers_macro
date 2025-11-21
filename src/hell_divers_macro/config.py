@@ -28,3 +28,6 @@ DEFAULT_DIRECTION_KEYS = {
     "Left": "left",
     "Right": "right",
 }
+
+DEFAULT_OVERLAY_LOCK_KEY = "`"
+DEFAULT_OVERLAY_OPACITY = 0.82

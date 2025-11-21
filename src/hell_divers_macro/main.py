@@ -5,10 +5,7 @@ grid, customize hotkeys/direction keys, and save/load profiles.
 
 from __future__ import annotations
 
-import io
 import json
-import re
-import platform
 import threading
 import time
 from pathlib import Path
@@ -17,7 +14,7 @@ from typing import Dict, List, Tuple
 import keyboard
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import ImageTk
 import sys
 
 if __package__ in (None, ""):
@@ -39,6 +36,27 @@ from hell_divers_macro.config import (
 from hell_divers_macro.log_utils import clear_log_callback, log, set_log_callback
 from hell_divers_macro.models import Macro, MacroRecord, MacroTemplate
 from hell_divers_macro.paths import ensure_saves_dir
+from hell_divers_macro.ui.icons import (
+    APP_ICON_PATH,
+    OVERLAY_ALPHA,
+    OVERLAY_ICON_SIZE,
+    build_overlay_placeholder,
+    load_icon_image,
+)
+from hell_divers_macro.ui.theme import (
+    ACCENT,
+    BG,
+    BUTTON_ACTIVE,
+    BUTTON_BG,
+    ENTRY_BG,
+    FG,
+    MENU_BG,
+    apply_dark_theme,
+    init_base_theme,
+    make_window_clickthrough,
+    place_window_near,
+    set_dark_titlebar,
+)
 from hell_divers_macro.stratagems import (
     load_stratagem_templates,
     resolve_template_keys,
@@ -48,463 +66,13 @@ from hell_divers_macro.stratagems import (
 _macro_lock = threading.Lock()
 _auto_panel_state: dict[str, object] = {"enabled": DEFAULT_AUTO_PANEL, "key": DEFAULT_PANEL_KEY}
 
-# --- Theme -------------------------------------------------------------------
-BG = "#121212"
-FG = "#e5e5e5"
-BUTTON_BG = "#1f1f1f"
-BUTTON_ACTIVE = "#2d2d2d"
-ENTRY_BG = "#1a1a1a"
-ACCENT = "#4e8cff"
-MENU_BG = "#161616"
-IS_WINDOWS = platform.system() == "Windows"
-ICON_SIZE = (120, 110)
+# --- Layout ------------------------------------------------------------------
 SLOT_WIDTH = 160
 SLOT_HEIGHT = 150
-OVERLAY_ICON_SIZE = (96, 88)
-OVERLAY_ALPHA = DEFAULT_OVERLAY_OPACITY
-
-
-def _resolve_assets_dir() -> Path:
-    """Locate assets, preferring packaged paths when frozen."""
-    if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", Path.cwd()))
-        for candidate in (base / "hell_divers_macro" / "assets", base / "assets"):
-            if candidate.exists():
-                return candidate
-    return Path(__file__).resolve().parent / "assets"
-
-
-ASSETS_DIR = _resolve_assets_dir()
-APP_ICON_PATH = ASSETS_DIR / "helldivers_2_macro_icon.png"
-
-_cairosvg_mod = None
-_cairosvg_error = None
-_HAS_CAIRO = False
-
-_svglib_mod = None
-_svglib_error = None
-_HAS_SVGLIB = False
-
-_icon_cache: dict[tuple[str, str, str, tuple[int, int]], ImageTk.PhotoImage] = {}
-_overlay_placeholder_cache: dict[tuple[str, tuple[int, int]], ImageTk.PhotoImage] = {}
-_macro_progress_callback = None
-_slot_hotkey_lookup: dict[str, str] = {}
-
-
-def _apply_dark_theme(widget: tk.Misc) -> None:
-    """Recursively apply a dark palette to a widget tree."""
-    cls = widget.winfo_class()
-    try:
-        widget.configure(bg=BG)
-    except tk.TclError:
-        pass
-
-    try:
-        widget.configure(fg=FG)
-    except tk.TclError:
-        pass
-
-    if cls == "Button":
-        try:
-            widget.configure(
-                bg=BUTTON_BG,
-                fg=FG,
-                activebackground=BUTTON_ACTIVE,
-                activeforeground=FG,
-                highlightthickness=0,
-                bd=1,
-            )
-        except tk.TclError:
-            pass
-    elif cls == "Label":
-        try:
-            widget.configure(bg=BG, fg=FG)
-        except tk.TclError:
-            pass
-    elif cls in ("Frame", "TFrame"):
-        try:
-            widget.configure(bg=BG)
-        except tk.TclError:
-            pass
-    elif cls == "Entry":
-        try:
-            widget.configure(
-                bg=ENTRY_BG,
-                fg=FG,
-                insertbackground=FG,
-                disabledforeground="#777777",
-            )
-        except tk.TclError:
-            pass
-    elif cls == "Listbox":
-        try:
-            widget.configure(
-                bg=ENTRY_BG,
-                fg=FG,
-                selectbackground=ACCENT,
-                selectforeground=FG,
-                highlightthickness=0,
-                relief=tk.FLAT,
-            )
-        except tk.TclError:
-            pass
-    elif cls == "Scrollbar":
-        try:
-            widget.configure(bg=BG, troughcolor=BUTTON_BG, activebackground=BUTTON_ACTIVE, highlightthickness=0)
-        except tk.TclError:
-            pass
-
-    for child in widget.winfo_children():
-        _apply_dark_theme(child)
-
-def _place_window_near(child: tk.Toplevel, parent: tk.Tk) -> None:
-    """Position child centered over the parent window."""
-    child.update_idletasks()
-    try:
-        px = parent.winfo_rootx()
-        py = parent.winfo_rooty()
-        pw = parent.winfo_width()
-        ph = parent.winfo_height()
-        cw = child.winfo_width()
-        ch = child.winfo_height()
-        x = px + max(0, (pw - cw) // 2)
-        y = py + max(0, (ph - ch) // 2)
-        child.geometry(f"+{x}+{y}")
-        child.lift()
-    except tk.TclError:
-        # Fall back silently if positioning fails (e.g., parent not mapped yet).
-        pass
-
-
-def _init_base_theme(root: tk.Tk) -> None:
-    """Set base palette defaults for new widgets."""
-    root.configure(bg=BG)
-    root.option_add("*Background", BG)
-    root.option_add("*Foreground", FG)
-    root.option_add("*Button.Background", BUTTON_BG)
-    root.option_add("*Button.Foreground", FG)
-    root.option_add("*Entry.Background", ENTRY_BG)
-    root.option_add("*Entry.Foreground", FG)
-    root.option_add("*Entry.InsertBackground", FG)
-    root.option_add("*Listbox.Background", ENTRY_BG)
-    root.option_add("*Listbox.Foreground", FG)
-    root.option_add("*Menu.Background", MENU_BG)
-    root.option_add("*Menu.Foreground", FG)
-    root.option_add("*Menu.activeBackground", BUTTON_ACTIVE)
-    root.option_add("*Menu.activeForeground", FG)
-
-
-def _set_dark_titlebar(win: tk.Tk | tk.Toplevel) -> None:
-    """On Windows, request a dark title bar; no-op elsewhere."""
-    if not IS_WINDOWS:
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        win.update_idletasks()
-        hwnd = wintypes.HWND(win.winfo_id())
-        user32 = ctypes.windll.user32
-        GA_ROOT = 2  # GetAncestor flag for root window
-        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
-        if root_hwnd:
-            hwnd = wintypes.HWND(root_hwnd)
-
-        # Ask the OS to allow dark chrome even if system setting is light.
-        try:
-            uxtheme = ctypes.windll.uxtheme
-
-            def _call(func_name: str, *args) -> bool:
-                func = getattr(uxtheme, func_name, None)
-                if func is None:
-                    return False
-                func.restype = wintypes.BOOL
-                func.argtypes = [type(arg) for arg in args]
-                try:
-                    func(*args)
-                    return True
-                except Exception:
-                    return False
-
-            # 0=Default, 1=AllowDark, 2=ForceDark (depends on build)
-            _call("SetPreferredAppMode", ctypes.c_int(2))
-            _call("AllowDarkModeForApp", wintypes.BOOL(True))
-            _call("AllowDarkModeForWindow", hwnd, wintypes.BOOL(True))
-            _call("RefreshImmersiveColorPolicyState")
-            _call("FlushMenuThemes")
-        except Exception:
-            pass
-
-        def _set_attr(attr: int, val: int) -> None:
-            value = wintypes.BOOL(val) if isinstance(val, bool) or val in (0, 1) else ctypes.c_int(val)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, ctypes.c_uint(attr), ctypes.byref(value), ctypes.sizeof(value)
-            )
-
-        def _hex_to_colorref(hex_color: str) -> int:
-            hex_color = hex_color.lstrip("#")
-            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-            return (b << 16) | (g << 8) | r  # COLORREF is 0x00bbggrr
-
-        def _set_color_attr(attr: int, hex_color: str) -> None:
-            color = wintypes.DWORD(_hex_to_colorref(hex_color))
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, ctypes.c_uint(attr), ctypes.byref(color), ctypes.sizeof(color)
-            )
-
-        # Windows 10/11 dark mode attribute (19 for 1809, 20 for 1903+).
-        build = sys.getwindowsversion().build
-        attr_order = (20, 19) if build >= 18362 else (19, 20)
-        for attr in attr_order:
-            _set_attr(attr, 1)
-
-        # Disable bright backdrops (e.g., Mica) and force our colors on Win11+.
-        try:
-            _set_attr(38, 0)  # DWMWA_SYSTEMBACKDROP_TYPE = None
-        except Exception:
-            pass
-
-        # Darken the frame/title elements so borders aren't bright on Win11.
-        _set_color_attr(34, BUTTON_BG)  # DWMWA_BORDER_COLOR
-        _set_color_attr(35, BG)  # DWMWA_CAPTION_COLOR
-        _set_color_attr(36, FG)  # DWMWA_TEXT_COLOR
-    except Exception:
-        pass
-
-
-def _make_window_clickthrough(win: tk.Tk | tk.Toplevel, alpha: float | None = None, clickthrough: bool = True) -> None:
-    """On Windows, control focus and mouse passthrough for a window."""
-    if not IS_WINDOWS:
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        try:
-            win.update_idletasks()
-        except tk.TclError:
-            pass
-        hwnd = wintypes.HWND(win.winfo_id())
-        user32 = ctypes.windll.user32
-        GWL_EXSTYLE = -20
-        WS_EX_LAYERED = 0x00080000
-        WS_EX_TRANSPARENT = 0x00000020
-        WS_EX_TOOLWINDOW = 0x00000080
-        WS_EX_NOACTIVATE = 0x08000000
-
-        # Ensure we are setting styles on the real root window handle.
-        GA_ROOT = 2
-        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
-        if root_hwnd:
-            hwnd = wintypes.HWND(root_hwnd)
-
-        current_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        new_style = current_style | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-        if clickthrough:
-            new_style |= WS_EX_TRANSPARENT
-        else:
-            new_style &= ~WS_EX_TRANSPARENT
-        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
-
-        if alpha is not None:
-            clamped = max(0.0, min(1.0, alpha))
-            user32.SetLayeredWindowAttributes(hwnd, 0, int(clamped * 255), 0x2)
-
-        SWP_NOMOVE = 0x0002
-        SWP_NOSIZE = 0x0001
-        SWP_NOZORDER = 0x0004
-        SWP_FRAMECHANGED = 0x0020
-        SWP_NOACTIVATE = 0x0010
-        user32.SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
-        )
-    except Exception:
-        # If any ctypes call fails, leave the window unchanged.
-        pass
-
-
-def _normalize_name(name: str) -> str:
-    """Normalize names for matching against asset filenames."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
-def _build_asset_map() -> dict[str, Path]:
-    mapping: dict[str, Path] = {}
-    if ASSETS_DIR.exists():
-        for pattern in ("*.png", "*.svg"):
-            for path in ASSETS_DIR.rglob(pattern):
-                key = _normalize_name(path.stem)
-                mapping.setdefault(key, path)
-    return mapping
-
-
-ASSET_MAP = _build_asset_map()
-
-
-def _get_cairosvg():
-    global _cairosvg_mod, _HAS_CAIRO, _cairosvg_error
-    if _cairosvg_mod is not None:
-        return _cairosvg_mod
-    try:
-        import cairosvg as _cs  # type: ignore[import-not-found]
-
-        _cairosvg_mod = _cs
-        _HAS_CAIRO = True
-        _cairosvg_error = None
-    except Exception as exc:
-        _cairosvg_error = str(exc)
-        _HAS_CAIRO = False
-        print(f"cairosvg import failed: {exc}")
-    return _cairosvg_mod
-
-
-def _get_svglib():
-    global _svglib_mod, _HAS_SVGLIB, _svglib_error
-    if _svglib_mod is not None:
-        return _svglib_mod
-    try:
-        from svglib.svglib import svg2rlg  # type: ignore[import-not-found]
-        from reportlab.graphics import renderPM  # type: ignore[import-not-found]
-
-        _svglib_mod = (svg2rlg, renderPM)
-        _HAS_SVGLIB = True
-        _svglib_error = None
-    except Exception as exc:
-        _svglib_error = str(exc)
-        _HAS_SVGLIB = False
-        print(f"svglib import failed: {exc}")
-    return _svglib_mod
-
-
-def _svg_to_png_bytes(svg_bytes: bytes) -> bytes | None:
-    cs = _get_cairosvg()
-    if cs is not None:
-        return cs.svg2png(bytestring=svg_bytes, output_width=ICON_SIZE[0], output_height=ICON_SIZE[1])
-    svglib_mod = _get_svglib()
-    if svglib_mod is not None:
-        svg2rlg, renderPM = svglib_mod
-        try:
-            drawing = svg2rlg(io.BytesIO(svg_bytes))
-            png_bytes = renderPM.drawToString(drawing, fmt="PNG")
-            return png_bytes
-        except Exception as exc:
-            print(f"svglib render failed: {exc}")
-    return None
-
-
-def _draw_key_badge(draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, key_text: str) -> None:
-    """Draw a small dark circle badge with the hotkey text."""
-    if not key_text:
-        return
-    bbox = draw.textbbox((0, 0), key_text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    radius = int(max(text_w, text_h) / 2 + 6)
-    cx = 10 + radius
-    cy = 10 + radius
-    draw.ellipse(
-        (cx - radius, cy - radius, cx + radius, cy + radius),
-        fill=(18, 18, 18, 210),
-    )
-    draw.text(
-        (cx - text_w / 2, cy - text_h / 2),
-        key_text,
-        font=font,
-        fill=(229, 229, 229, 255),
-    )
-
-
-def _load_icon_image(
-    name: str, hotkey_text: str, *, variant: str = "full", size: tuple[int, int] | None = None
-) -> ImageTk.PhotoImage | None:
-    """Return a PhotoImage with icon overlays, or None if unavailable.
-
-    variant: "full" keeps the name ribbon; "badge" keeps only the key badge.
-    """
-    target_size = size or ICON_SIZE
-    cache_key = (name, hotkey_text, variant, target_size)
-    if cache_key in _icon_cache:
-        return _icon_cache[cache_key]
-
-    key = _normalize_name(name)
-    asset_path = ASSET_MAP.get(key)
-    if not asset_path or not asset_path.exists():
-        return None
-
-    try:
-        if asset_path.suffix.lower() == ".png":
-            image = Image.open(asset_path).convert("RGBA")
-            if image.size != target_size:
-                image = image.resize(target_size, Image.LANCZOS)
-        else:
-            svg_bytes = asset_path.read_bytes()
-            png_bytes = _svg_to_png_bytes(svg_bytes)
-            if png_bytes is None:
-                if not getattr(_load_icon_image, "_warned", False):
-                    msg = "SVG rasterization unavailable; icons will not display."
-                    details = _cairosvg_error or _svglib_error
-                    if details:
-                        msg += f" ({details})"
-                    print(msg)
-                    _load_icon_image._warned = True
-                return None
-            image = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-            if image.size != target_size:
-                image = image.resize(target_size, Image.LANCZOS)
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-
-        # Top-left hotkey label.
-        key_text = hotkey_text.strip()
-        if key_text:
-            if variant == "badge":
-                _draw_key_badge(draw, font, key_text)
-            else:
-                draw.text((6, 4), key_text, font=font, fill=(229, 229, 229, 255))
-
-        # Bottom name overlay.
-        if variant == "full":
-            name_w, name_h = draw.textbbox((0, 0), name, font=font)[2:]
-            overlay_height = name_h + 8
-            y0 = image.height - overlay_height
-            draw.rectangle([0, y0, image.width, image.height], fill=(18, 18, 18, 180))
-            draw.text(
-                ((image.width - name_w) / 2, y0 + 4),
-                name,
-                font=font,
-                fill=(229, 229, 229, 255),
-            )
-
-        photo = ImageTk.PhotoImage(image)
-        _icon_cache[cache_key] = photo
-        return photo
-    except Exception:
-        return None
-
-
-def _build_overlay_placeholder(hotkey_text: str, size: tuple[int, int] = OVERLAY_ICON_SIZE) -> ImageTk.PhotoImage:
-    """Create a dimmed placeholder tile with just the hotkey badge."""
-    label = hotkey_text.strip() or "?"
-    cache_key = (label, size)
-    if cache_key in _overlay_placeholder_cache:
-        return _overlay_placeholder_cache[cache_key]
-    image = Image.new("RGBA", size, (26, 26, 26, 180))
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((1, 1, size[0] - 2, size[1] - 2), outline=(70, 70, 70, 210), width=2)
-    font = ImageFont.load_default()
-    _draw_key_badge(draw, font, label)
-    photo = ImageTk.PhotoImage(image)
-    _overlay_placeholder_cache[cache_key] = photo
-    return photo
-
 
 # --- Macro execution helpers -------------------------------------------------
+_macro_progress_callback = None
+_slot_hotkey_lookup: dict[str, str] = {}
 def _run_macro(macro: Macro, panel_key: str | None = None) -> None:
     with _macro_lock:
         label = macro.name or macro.hotkey
@@ -748,10 +316,10 @@ class MacroSelectionDialog:
 
         self.top.protocol("WM_DELETE_WINDOW", self.cancel)
         self.top.grab_set()
-        _place_window_near(self.top, parent)
+        place_window_near(self.top, parent)
         self.top.focus_set()
-        _apply_dark_theme(self.top)
-        _set_dark_titlebar(self.top)
+        apply_dark_theme(self.top)
+        set_dark_titlebar(self.top)
 
         if ordered_categories:
             switch_cat(ordered_categories[0])
@@ -795,10 +363,10 @@ class TextEntryDialog:
         self.top.bind("<Return>", lambda _: self.ok())
         self.top.bind("<Escape>", lambda _: self.cancel())
         self.top.grab_set()
-        _place_window_near(self.top, parent)
+        place_window_near(self.top, parent)
         entry.focus_set()
-        _apply_dark_theme(self.top)
-        _set_dark_titlebar(self.top)
+        apply_dark_theme(self.top)
+        set_dark_titlebar(self.top)
         parent.wait_window(self.top)
 
     def ok(self) -> None:
@@ -826,9 +394,9 @@ def main() -> None:
             root.iconphoto(True, tk.PhotoImage(file=str(APP_ICON_PATH)))
     except Exception:
         pass
-    _init_base_theme(root)
-    _apply_dark_theme(root)
-    _set_dark_titlebar(root)
+    init_base_theme(root)
+    apply_dark_theme(root)
+    set_dark_titlebar(root)
 
     assignments: dict[str, MacroTemplate | None] = {slot: None for slot, _ in NUMPAD_SLOTS}
     slot_hotkeys: dict[str, str] = dict(DEFAULT_SLOT_HOTKEYS)
@@ -842,10 +410,11 @@ def main() -> None:
     macro_timing = {"delay": DEFAULT_DELAY, "duration": DEFAULT_DURATION}
     panel_key_display = tk.StringVar(value="")
     overlay_lock_key: str = DEFAULT_OVERLAY_LOCK_KEY
-    overlay_locked = {"val": True}
+    overlay_locked = {"val": False}
     overlay_opacity = tk.DoubleVar(value=OVERLAY_ALPHA)
     overlay_lock_handle: int | None = None
     overlay_drag_state = {"x": 0, "y": 0}
+    overlay_dragging = {"val": False}
     overlay_lock_display = tk.StringVar(value="")
     overlay_resize_state = {"x": 0, "y": 0, "w": 0, "h": 0}
     overlay_resize_handle: tk.Canvas | None = None
@@ -853,7 +422,6 @@ def main() -> None:
     overlay_auto_panel_check: tk.Checkbutton | None = None
     overlay_close_btn: tk.Button | None = None
     overlay_lock_label: tk.Label | None = None
-    overlay_header_right: tk.Frame | None = None
 
     def sync_auto_panel_state() -> None:
         _auto_panel_state["key"] = panel_key
@@ -919,38 +487,29 @@ def main() -> None:
             pass
 
     def _update_overlay_header_visibility() -> None:
-        # Left: auto-panel toggle (only when unlocked)
-        if overlay_auto_panel_check is not None:
-            try:
-                overlay_auto_panel_check.pack_forget()
-                if not overlay_locked["val"]:
-                    overlay_auto_panel_check.pack(side=tk.LEFT, anchor="w")
-            except tk.TclError:
-                pass
-        # Right frame always present for consistent order.
-        if overlay_header_right is not None:
-            try:
-                if overlay_header_right.winfo_manager() != "pack":
-                    overlay_header_right.pack(side=tk.RIGHT)
-            except tk.TclError:
-                pass
-        if overlay_close_btn is not None:
-            try:
-                overlay_close_btn.pack_forget()
-                if not overlay_locked["val"]:
-                    overlay_close_btn.pack(side=tk.RIGHT, padx=(6, 0))
-            except tk.TclError:
-                pass
-        if overlay_lock_label is not None:
-            try:
-                overlay_lock_label.pack_forget()
-                if overlay_locked["val"]:
-                    overlay_lock_label.pack(side=tk.RIGHT, padx=(0, 6), anchor="e")
-                else:
-                    # Pack close first (above) so label lands to its left.
-                    overlay_lock_label.pack(side=tk.RIGHT, padx=(0, 6), anchor="e")
-            except tk.TclError:
-                pass
+        for widget in (overlay_auto_panel_check, overlay_close_btn, overlay_lock_label):
+            _hide_widget(widget)
+        if overlay_locked["val"]:
+            _show_widget(overlay_lock_label, side=tk.RIGHT, padx=(0, 6), anchor="e")
+        else:
+            _show_widget(overlay_close_btn, side=tk.RIGHT, padx=(6, 0))
+            _show_widget(overlay_lock_label, side=tk.RIGHT, padx=(0, 6), anchor="e")
+            _show_widget(overlay_auto_panel_check, side=tk.LEFT, anchor="w")
+
+    def _overlay_event_target(event) -> tk.Widget | None:  # noqa: ANN001
+        """Return widget under cursor for overlay events."""
+        if overlay_win is None:
+            return None
+        try:
+            return overlay_win.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return None
+
+    def _is_overlay_interactive_widget(widget: tk.Widget | None) -> bool:
+        """Widgets that should receive clicks instead of starting a drag."""
+        if widget is None:
+            return False
+        return isinstance(widget, (tk.Button, tk.Checkbutton, tk.Entry, tk.Scale, tk.Listbox, tk.Text))
 
     grid_layout = [
         ["7", "8", "9"],
@@ -967,31 +526,40 @@ def main() -> None:
     overlay_icons: dict[str, ImageTk.PhotoImage | None] = {}
     overlay_progress: dict[str, dict[str, object]] = {}
     overlay_user_resized = {"val": False}
+    overlay_applying_config = {"val": False}
 
     def _apply_overlay_window_config() -> None:
         if overlay_win is None or not overlay_win.winfo_exists():
             return
-        opacity = _clamp_opacity(overlay_opacity.get())
-        overlay_opacity.set(opacity)
+        if overlay_applying_config["val"]:
+            return
+        overlay_applying_config["val"] = True
         try:
-            overlay_win.attributes("-topmost", True)
-            overlay_win.attributes("-alpha", opacity)
-        except tk.TclError:
-            pass
-        _make_window_clickthrough(overlay_win, alpha=opacity, clickthrough=overlay_locked["val"])
-        try:
-            overlay_win.configure(cursor="" if overlay_locked["val"] else "fleur")
-        except tk.TclError:
-            pass
-        if overlay_resize_handle is not None:
+            opacity = _clamp_opacity(overlay_opacity.get())
+            overlay_opacity.set(opacity)
             try:
-                overlay_resize_handle.configure(cursor="size_nw_se" if not overlay_locked["val"] else "")
+                overlay_win.attributes("-topmost", True)
+                overlay_win.attributes("-alpha", opacity)
             except tk.TclError:
                 pass
-        _update_overlay_lock_display()
-        _update_overlay_header_visibility()
+            make_window_clickthrough(overlay_win, alpha=opacity, clickthrough=overlay_locked["val"])
+            try:
+                overlay_win.attributes("-disabled", overlay_locked["val"])
+                overlay_win.configure(cursor="" if overlay_locked["val"] else "fleur")
+            except tk.TclError:
+                pass
+            if overlay_resize_handle is not None:
+                try:
+                    overlay_resize_handle.configure(cursor="size_nw_se" if not overlay_locked["val"] else "")
+                except tk.TclError:
+                    pass
+            _update_overlay_lock_display()
+            _update_overlay_header_visibility()
+        finally:
+            overlay_applying_config["val"] = False
 
     def _start_overlay_drag(event) -> None:  # noqa: ANN001
+        overlay_dragging["val"] = False
         if (
             overlay_locked["val"]
             or overlay_resizing["val"]
@@ -999,8 +567,10 @@ def main() -> None:
             or not overlay_win.winfo_exists()
         ):
             return
-        if overlay_resize_handle is not None and event.widget is overlay_resize_handle:
+        target = _overlay_event_target(event)
+        if target is overlay_resize_handle or _is_overlay_interactive_widget(target):
             return
+        overlay_dragging["val"] = True
         overlay_drag_state["x"] = event.x_root
         overlay_drag_state["y"] = event.y_root
 
@@ -1010,6 +580,7 @@ def main() -> None:
             or overlay_resizing["val"]
             or overlay_win is None
             or not overlay_win.winfo_exists()
+            or not overlay_dragging["val"]
         ):
             return
         dx = event.x_root - overlay_drag_state["x"]
@@ -1047,6 +618,7 @@ def main() -> None:
             pass
 
     def _stop_overlay_resize(event=None) -> None:  # noqa: ANN001
+        overlay_dragging["val"] = False
         overlay_resizing["val"] = False
 
     def toggle_overlay_lock() -> None:
@@ -1090,10 +662,10 @@ def main() -> None:
         width = max(int(root.winfo_width() * 0.55), min_w)
         height = max(int(root.winfo_height() * 0.55), min_h)
         overlay_win.geometry(f"{width}x{height}")
-        _place_window_near(overlay_win, root)
+        place_window_near(overlay_win, root)
 
     def _ensure_overlay_window() -> None:
-        nonlocal overlay_win, overlay_resize_handle, overlay_auto_panel_check, overlay_close_btn, overlay_lock_label, overlay_header_right
+        nonlocal overlay_win, overlay_resize_handle, overlay_auto_panel_check, overlay_close_btn, overlay_lock_label
         if overlay_win is not None and overlay_win.winfo_exists():
             return
         overlay_slot_canvases.clear()
@@ -1107,7 +679,6 @@ def main() -> None:
         overlay_win.attributes("-topmost", True)
         _apply_overlay_window_config()
         overlay_win.protocol("WM_DELETE_WINDOW", lambda: handle_overlay_close())
-        overlay_win.bind("<Map>", lambda event=None: _apply_overlay_window_config())
         overlay_win.bind("<ButtonPress-1>", _start_overlay_drag)
         overlay_win.bind("<B1-Motion>", _drag_overlay)
         overlay_win.bind("<ButtonRelease-1>", _stop_overlay_resize)
@@ -1129,10 +700,8 @@ def main() -> None:
             highlightthickness=0,
             anchor="w",
         )
-        overlay_header_right = tk.Frame(auto_frame, bg=BG)
-        overlay_header_right.pack(side=tk.RIGHT)
         overlay_close_btn = tk.Button(
-            overlay_header_right,
+            auto_frame,
             text="X",
             command=lambda: root.after(0, stop_listening),
             width=2,
@@ -1143,7 +712,7 @@ def main() -> None:
             bd=0,
             highlightthickness=0,
         )
-        overlay_lock_label = tk.Label(overlay_header_right, textvariable=overlay_lock_display, anchor="e")
+        overlay_lock_label = tk.Label(auto_frame, textvariable=overlay_lock_display, anchor="e")
 
         grid = tk.Frame(container, bg=BG)
         grid.pack(fill=tk.BOTH, expand=True)
@@ -1183,8 +752,8 @@ def main() -> None:
                 grid.grid_columnconfigure(c, weight=1, uniform="overlay_slots")
             grid.grid_rowconfigure(r, weight=1, uniform="overlay_slots")
 
-        _apply_dark_theme(overlay_win)
-        _set_dark_titlebar(overlay_win)
+        apply_dark_theme(overlay_win)
+        set_dark_titlebar(overlay_win)
         overlay_user_resized["val"] = False
         overlay_win.bind(
             "<Configure>",
@@ -1223,9 +792,9 @@ def main() -> None:
         hotkey_text = _display_hotkey_text(hotkey, slot)
         icon: ImageTk.PhotoImage | None = None
         if tpl:
-            icon = _load_icon_image(tpl.name, hotkey_text, variant="badge", size=OVERLAY_ICON_SIZE)
+            icon = load_icon_image(tpl.name, hotkey_text, variant="badge", size=OVERLAY_ICON_SIZE)
         else:
-            icon = _build_overlay_placeholder(hotkey_text, size=OVERLAY_ICON_SIZE)
+            icon = build_overlay_placeholder(hotkey_text, size=OVERLAY_ICON_SIZE)
         overlay_icons[slot] = icon
         canvas.delete("icon")
         canvas.create_image(
@@ -1323,7 +892,7 @@ def main() -> None:
         hotkey_text = _display_hotkey_text(hotkey, slot)
         icon: ImageTk.PhotoImage | None = None
         if tpl:
-            icon = _load_icon_image(tpl.name, hotkey_text)
+            icon = load_icon_image(tpl.name, hotkey_text)
         slot_icons[slot] = icon
         if icon:
             slot_buttons[slot].config(image=icon, text="", compound=tk.CENTER)
@@ -1479,8 +1048,8 @@ def main() -> None:
         settings = tk.Toplevel(root, bg=BG)
         settings.title("Settings - Key Binds")
         settings.resizable(True, True)
-        _place_window_near(settings, root)
-        _set_dark_titlebar(settings)
+        place_window_near(settings, root)
+        set_dark_titlebar(settings)
 
         status_local = tk.StringVar(value="Select a slot and press a key to rebind.")
         change_buttons: dict[str, tk.Button] = {}
@@ -1790,7 +1359,7 @@ def main() -> None:
         tk.Button(btn_frame, text="Apply", command=apply_and_stay).pack(side=tk.LEFT)
         tk.Button(btn_frame, text="Close", command=settings.destroy).pack(side=tk.RIGHT)
 
-        _apply_dark_theme(settings)
+        apply_dark_theme(settings)
         refresh_labels()
 
     # --- Persistence ---
@@ -1799,8 +1368,8 @@ def main() -> None:
         edit = tk.Toplevel(root, bg=BG)
         edit.title("Edit Stratagem Templates")
         edit.resizable(True, True)
-        _place_window_near(edit, root)
-        _set_dark_titlebar(edit)
+        place_window_near(edit, root)
+        set_dark_titlebar(edit)
 
         working: list[MacroTemplate] = list(templates)
         filter_var = tk.StringVar()
@@ -1932,7 +1501,7 @@ def main() -> None:
         else:
             status_var.set("No templates to edit.")
 
-        _apply_dark_theme(edit)
+        apply_dark_theme(edit)
         edit.grab_set()
 
     def _save_profile_to_path(path: Path, show_message: bool = True) -> bool:
@@ -2052,7 +1621,7 @@ def main() -> None:
         else:
             overlay_lock_key = DEFAULT_OVERLAY_LOCK_KEY
             overlay_opacity.set(OVERLAY_ALPHA)
-        overlay_locked["val"] = True
+        overlay_locked["val"] = False
         register_overlay_lock_hotkey()
         _update_overlay_lock_display()
         _apply_overlay_window_config()
@@ -2097,7 +1666,7 @@ def main() -> None:
         direction_keys.update(DEFAULT_DIRECTION_KEYS)
         panel_key = DEFAULT_PANEL_KEY
         overlay_lock_key = DEFAULT_OVERLAY_LOCK_KEY
-        overlay_locked["val"] = True
+        overlay_locked["val"] = False
         overlay_opacity.set(OVERLAY_ALPHA)
         auto_panel_var.set(DEFAULT_AUTO_PANEL)
         macro_timing["delay"] = DEFAULT_DELAY
@@ -2172,7 +1741,7 @@ def main() -> None:
         about.title("About")
         about.transient(root)
         about.resizable(False, False)
-        _place_window_near(about, root)
+        place_window_near(about, root)
 
         text = (
             "HELLDIVERS2 Stratagem Macro\nCreated by FatterCatDev\n\n"
@@ -2185,8 +1754,8 @@ def main() -> None:
         )
         tk.Button(about, text="OK", command=about.destroy).pack(pady=(0, 12))
 
-        _apply_dark_theme(about)
-        _set_dark_titlebar(about)
+        apply_dark_theme(about)
+        set_dark_titlebar(about)
         about.grab_set()
         about.focus_set()
 
@@ -2312,9 +1881,9 @@ def main() -> None:
 
     saved_state = serialize_state()
     update_all_buttons()
-    _apply_dark_theme(root)
+    apply_dark_theme(root)
     _refresh_menu_bar_colors()
-    _set_dark_titlebar(root)  # Re-apply after widgets are realized.
+    set_dark_titlebar(root)  # Re-apply after widgets are realized.
 
     # Auto-load last profile if available.
     if last_profile_marker.exists():

@@ -26,13 +26,7 @@ if __package__ in (None, ""):
 
 from hell_divers_macro.config import (  # noqa: E402
     DEFAULT_AUTO_PANEL,
-    DEFAULT_DELAY,
-    DEFAULT_DIRECTION_KEYS,
-    DEFAULT_DURATION,
-    DEFAULT_OVERLAY_LOCK_KEY,
     DEFAULT_OVERLAY_OPACITY,
-    DEFAULT_PANEL_KEY,
-    DEFAULT_SLOT_HOTKEYS,
     EXIT_HOTKEY,
     NUMPAD_SLOTS,
 )
@@ -49,7 +43,6 @@ from hell_divers_macro.stratagems import (  # noqa: E402
 from hell_divers_macro.ui.dialogs import MacroSelectionDialog  # noqa: E402
 from hell_divers_macro.ui.icons import (  # noqa: E402
     APP_ICON_PATH,
-    ICON_SIZE,
     OVERLAY_ALPHA,
     load_icon_image,
 )

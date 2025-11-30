@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Dict
+from typing import Callable, Dict, Iterable
 
 import keyboard
 
 from hell_divers_macro.config import DEFAULT_AUTO_PANEL, DEFAULT_PANEL_KEY
 from hell_divers_macro.log_utils import log
-from hell_divers_macro.models import Macro, MacroRecord
+from hell_divers_macro.models import HotkeyHandle, Macro, MacroRecord
 
 MacroProgressCallback = Callable[[str, Macro, str | None, float | None], None]
 
@@ -58,10 +58,17 @@ class MacroManager:
         """Remove all listeners."""
         for record in self.records:
             press_hook, release_hook = record.handle
-            keyboard.unhook(press_hook)
-            keyboard.unhook(release_hook)
+            for hook in (press_hook, release_hook):
+                try:
+                    keyboard.unhook(hook)
+                except KeyError:
+                    # Hook already removed elsewhere; make clear idempotent.
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    log(f"Failed to unhook keyboard listener: {exc}")
         self.records.clear()
         self._slot_hotkey_lookup.clear()
+        self._held_scancodes.clear()
 
     def shutdown(self) -> None:
         """Alias for clear for symmetry with startup."""
@@ -72,7 +79,7 @@ class MacroManager:
         handle = self._register_macro(macro)
         self.records.append(MacroRecord(macro, handle))
 
-    def _register_macro(self, macro: Macro) -> int:
+    def _register_macro(self, macro: Macro) -> tuple[HotkeyHandle, HotkeyHandle]:
         def on_press(event) -> None:
             if event.event_type != "down":
                 return

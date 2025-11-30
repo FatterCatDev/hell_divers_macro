@@ -1,8 +1,9 @@
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Callable, Tuple
 
 from .config import DEFAULT_DELAY, DEFAULT_DURATION
 
+HotkeyHandle = Callable[[], None]
 
 @dataclass(frozen=True)
 class Macro:
@@ -16,7 +17,7 @@ class Macro:
 @dataclass
 class MacroRecord:
     macro: Macro
-    handle: object
+    handle: tuple[HotkeyHandle, HotkeyHandle]
 
 
 @dataclass(frozen=True)

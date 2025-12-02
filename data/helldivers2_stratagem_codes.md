@@ -85,3 +85,7 @@
 - **Resupply**: Down, Down, Up, Right
 - **SSSD Delivery**: Down, Down, Down, Up, Up
 - **Seismic Probe**: Up, Up, Left, Right, Down, Down
+## 8, Python Commandos
+- **AX/FLAM-75 "Guard Dog" Hot Dog**: Down, Up, Left, Up, Left, Left
+- **CQC-9 Defoliation Tool**: 
+- **M-1000 Maxigun**:
